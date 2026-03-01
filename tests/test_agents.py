@@ -6,12 +6,15 @@ from pathlib import Path
 
 import pytest
 
+from forge.agents.autofix import AutoFixer, Check, AutoFixResult
 from forge.agents.base import BaseAgent, AgentConfig
 from forge.agents.cascade import CascadeAgent, CascadeConfig, auto_cascade_config
+from forge.agents.memory import ConversationMemory
 from forge.agents.permissions import (
     PermissionManager, PermissionLevel, AutoApproveManager, DEFAULT_PERMISSIONS,
 )
 from forge.agents.qa import QAAgent, QAResult
+from forge.agents.rules import load_project_rules, create_rules_template
 from forge.agents.tracker import AgentTracker
 from forge.community.ideas import IdeaCollector
 
@@ -430,3 +433,162 @@ class TestQAAgent:
             review = qa.review_code(files_changed=["test.py"])
             assert isinstance(review, str)
             assert len(review) > 0
+
+
+# ─── Auto-Fix Tests ──────────────────────────────────────────────────────────
+
+
+class TestAutoFixer:
+    """Tests for the auto-fix loop."""
+
+    def test_init(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            fixer = AutoFixer(working_dir=tmpdir, auto_detect=False)
+            assert fixer.max_attempts == 3
+            assert len(fixer.checks) == 0
+
+    def test_add_check(self):
+        fixer = AutoFixer(working_dir="/tmp", auto_detect=False)
+        fixer.add_check("test-check", "echo ok")
+        assert len(fixer.checks) == 1
+        assert fixer.checks[0].name == "test-check"
+
+    def test_run_checks_on_valid_file(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            # Use a .txt file to avoid DEFAULT_CHECKS for .py
+            txt_file = Path(tmpdir) / "valid.txt"
+            txt_file.write_text("hello world\n")
+
+            fixer = AutoFixer(working_dir=tmpdir, auto_detect=False)
+            fixer.add_check("always-pass", "true")
+            results = fixer.run_checks([str(txt_file)])
+            assert all(r.passed for r in results)
+
+    def test_run_checks_with_failure(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            txt_file = Path(tmpdir) / "test.txt"
+            txt_file.write_text("content\n")
+
+            fixer = AutoFixer(working_dir=tmpdir, auto_detect=False)
+            fixer.add_check("always-fail", "false")
+            results = fixer.run_checks([str(txt_file)])
+            assert any(not r.passed for r in results)
+
+    def test_check_and_fix_all_pass(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            txt_file = Path(tmpdir) / "good.txt"
+            txt_file.write_text("ok\n")
+
+            fixer = AutoFixer(working_dir=tmpdir, auto_detect=False)
+            fixer.add_check("check", "true")
+            result = fixer.check_and_fix([str(txt_file)])
+            assert result.all_passed
+            assert result.fixes_attempted == 0
+
+    def test_auto_fix_result(self):
+        result = AutoFixResult(
+            all_passed=True,
+            checks_run=5,
+            fixes_attempted=1,
+        )
+        assert result.all_passed
+        assert result.checks_run == 5
+
+
+# ─── Conversation Memory Tests ───────────────────────────────────────────────
+
+
+class TestConversationMemory:
+    """Tests for persistent conversation memory."""
+
+    def test_store_and_retrieve_fact(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            mem = ConversationMemory(memory_dir=tmpdir)
+            mem.store_fact("language", "Python")
+            assert mem.get_fact("language") == "Python"
+            assert mem.get_fact("nonexistent") is None
+
+    def test_facts_persist(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            mem1 = ConversationMemory(memory_dir=tmpdir)
+            mem1.store_fact("user_name", "Alice")
+
+            mem2 = ConversationMemory(memory_dir=tmpdir)
+            assert mem2.get_fact("user_name") == "Alice"
+
+    def test_save_and_load_conversation(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            mem = ConversationMemory(memory_dir=tmpdir)
+            messages = [
+                {"role": "user", "content": "Hello"},
+                {"role": "assistant", "content": "Hi there!"},
+            ]
+            path = mem.save_conversation(messages, session_id="test123")
+            assert path
+            assert Path(path).exists()
+
+            recent = mem.get_recent_context(max_messages=10)
+            assert len(recent) == 2
+            assert recent[0]["content"] == "Hello"
+
+    def test_facts_context(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            mem = ConversationMemory(memory_dir=tmpdir)
+            mem.store_fact("pref_editor", "vim")
+            mem.store_fact("pref_lang", "Python")
+            context = mem.get_facts_context()
+            assert "pref_editor" in context
+            assert "vim" in context
+
+    def test_clear_memory(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            mem = ConversationMemory(memory_dir=tmpdir)
+            mem.store_fact("key", "value")
+            mem.save_conversation([{"role": "user", "content": "test"}])
+            mem.clear()
+            assert mem.get_fact("key") is None
+            assert mem.get_recent_context() == []
+
+    def test_summary(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            mem = ConversationMemory(memory_dir=tmpdir)
+            mem.save_summary("User was working on a Python project")
+            assert "Python project" in mem.get_summary()
+
+
+# ─── Project Rules Tests ─────────────────────────────────────────────────────
+
+
+class TestProjectRules:
+    """Tests for project rules file support."""
+
+    def test_no_rules_returns_empty(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            rules = load_project_rules(tmpdir)
+            assert rules == ""
+
+    def test_load_forge_rules(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            rules_file = Path(tmpdir) / ".forge-rules"
+            rules_file.write_text("Always use type hints")
+            rules = load_project_rules(tmpdir)
+            assert "type hints" in rules
+
+    def test_load_claude_md(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            rules_file = Path(tmpdir) / "CLAUDE.md"
+            rules_file.write_text("Use pytest for testing")
+            rules = load_project_rules(tmpdir)
+            assert "pytest" in rules
+
+    def test_create_template(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            result = create_rules_template(tmpdir)
+            assert "Created" in result
+            assert (Path(tmpdir) / ".forge-rules").exists()
+
+    def test_create_template_already_exists(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            (Path(tmpdir) / ".forge-rules").write_text("existing")
+            result = create_rules_template(tmpdir)
+            assert "already exists" in result

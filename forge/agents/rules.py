@@ -86,7 +86,9 @@ def _find_rules_in_dir(directory: Path) -> str:
     """Look for a rules file in a specific directory."""
     for filename in RULES_FILENAMES:
         rules_path = directory / filename
-        return _read_rules_file(rules_path)
+        content = _read_rules_file(rules_path)
+        if content:
+            return content
     return ""
 
 

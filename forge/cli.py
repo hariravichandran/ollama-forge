@@ -41,6 +41,7 @@ def chat(model: str, agent: str, working_dir: str, cascade: bool, auto_approve: 
     from forge.llm.client import OllamaClient
     from forge.agents.orchestrator import AgentOrchestrator
     from forge.agents.permissions import PermissionManager, AutoApproveManager
+    from forge.agents.memory import ConversationMemory
 
     config = load_config()
 
@@ -68,6 +69,10 @@ def chat(model: str, agent: str, working_dir: str, cascade: bool, auto_approve: 
     # Permission manager
     permissions = AutoApproveManager() if auto_approve else PermissionManager()
 
+    # Conversation memory
+    memory = ConversationMemory()
+    facts_context = memory.get_facts_context()
+
     # Initialize orchestrator
     orchestrator = AgentOrchestrator(client=client, working_dir=working_dir)
     if agent != "assistant":
@@ -85,11 +90,13 @@ def chat(model: str, agent: str, working_dir: str, cascade: bool, auto_approve: 
             console.print("[dim]Cascade: no escalation model available for your hardware[/dim]")
 
     # Print welcome
+    memory_status = f"  Memory: {len(memory._facts)} facts" if memory._facts else ""
     console.print(Panel(
         f"[bold]ollama-forge[/bold] v0.1.0\n"
         f"Model: [cyan]{model_name}[/cyan]  Agent: [green]{orchestrator.active_agent}[/green]\n"
-        f"Hardware: {profile.name} ({hw.gpu.name})\n\n"
-        f"Commands: /agents, /agent <name>, /model <name>, /reset, /stats, /idea, /quit",
+        f"Hardware: {profile.name} ({hw.gpu.name}){memory_status}\n\n"
+        f"Commands: /agents, /agent <name>, /model <name>, /reset, /stats, /idea,\n"
+        f"          /remember <fact>, /forget, /quit",
         title="Welcome",
         border_style="blue",
     ))
@@ -107,6 +114,10 @@ def chat(model: str, agent: str, working_dir: str, cascade: bool, auto_approve: 
 
         # Handle commands
         if user_input.lower() in ("/quit", "/exit", "exit", "quit"):
+            # Save conversation before exiting
+            current_agent = orchestrator.agents.get(orchestrator.active_agent)
+            if current_agent and current_agent.messages:
+                memory.save_conversation(current_agent.messages)
             console.print("Goodbye!")
             break
         elif user_input == "/reset":
@@ -125,6 +136,20 @@ def chat(model: str, agent: str, working_dir: str, cascade: bool, auto_approve: 
                 console.print(f"Switched to model: [cyan]{new_model}[/cyan]")
             else:
                 console.print(f"[red]Failed to switch to {new_model}[/red]")
+            continue
+        elif user_input.startswith("/remember "):
+            fact = user_input[10:].strip()
+            if ":" in fact:
+                key, value = fact.split(":", 1)
+                memory.store_fact(key.strip(), value.strip())
+                console.print(f"[green]Remembered: {key.strip()} = {value.strip()}[/green]")
+            else:
+                memory.store_fact(f"note_{len(memory._facts)}", fact)
+                console.print(f"[green]Remembered: {fact}[/green]")
+            continue
+        elif user_input == "/forget":
+            memory.clear()
+            console.print("[dim]Memory cleared.[/dim]")
             continue
         elif user_input.startswith("/idea"):
             _handle_idea_command(user_input, working_dir)
@@ -694,6 +719,48 @@ def benchmark():
         console.print("[yellow]Consider using a smaller model for better responsiveness.[/yellow]")
     elif avg_tps > 20:
         console.print("[green]Good performance! You could try a larger model.[/green]")
+
+
+# ─── API Server ──────────────────────────────────────────────────────────────
+
+
+@main.command()
+@click.option("--port", "-p", default=8000, help="Port to listen on")
+@click.option("--host", default="127.0.0.1", help="Host to bind to")
+def api(port: int, host: str):
+    """Start an OpenAI-compatible API server.
+
+    \b
+    Other tools can connect at http://localhost:8000/v1/chat/completions
+    """
+    from forge.api.openai_compat import run_api_server
+
+    console.print(
+        Panel(
+            f"Starting OpenAI-compatible API server\n\n"
+            f"Base URL: [cyan]http://{host}:{port}/v1[/cyan]\n"
+            f"Models:   [cyan]http://{host}:{port}/v1/models[/cyan]\n"
+            f"Health:   [cyan]http://{host}:{port}/health[/cyan]\n\n"
+            f"Use in your tools:\n"
+            f'  OPENAI_BASE_URL=http://{host}:{port}/v1',
+            title="ollama-forge API",
+            border_style="blue",
+        )
+    )
+    run_api_server(port=port, host=host)
+
+
+# ─── Rules ───────────────────────────────────────────────────────────────────
+
+
+@main.command("init-rules")
+@click.option("--dir", "-d", "directory", default=".", help="Directory to create rules in")
+def init_rules(directory: str):
+    """Create a .forge-rules template in the current directory."""
+    from forge.agents.rules import create_rules_template
+
+    result = create_rules_template(directory)
+    console.print(f"[green]{result}[/green]")
 
 
 if __name__ == "__main__":
