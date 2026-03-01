@@ -1,7 +1,13 @@
-"""Filesystem tool: read, write, edit, glob, grep files."""
+"""Filesystem tool: read, write, edit, glob, grep files.
+
+Includes fuzzy matching for edit operations — when local LLMs produce
+slightly incorrect search strings (whitespace, indentation), the fuzzy
+matcher finds the best match instead of failing.
+"""
 
 from __future__ import annotations
 
+import difflib
 import fnmatch
 import os
 import re
@@ -11,6 +17,9 @@ from typing import Any
 from forge.utils.logging import get_logger
 
 log = get_logger("tools.filesystem")
+
+# Minimum similarity ratio for fuzzy matching (0.0 to 1.0)
+FUZZY_MATCH_THRESHOLD = 0.75
 
 
 class FilesystemTool:
@@ -162,15 +171,62 @@ class FilesystemTool:
             return f"File not found: {path}"
 
         content = resolved.read_text()
+
+        # Try exact match first
         count = content.count(old_string)
-        if count == 0:
-            return f"String not found in {path}"
+        if count == 1:
+            new_content = content.replace(old_string, new_string, 1)
+            resolved.write_text(new_content)
+            return f"Replaced 1 occurrence in {path}"
+
         if count > 1:
             return f"String found {count} times in {path} — provide more context to make it unique"
 
-        new_content = content.replace(old_string, new_string, 1)
-        resolved.write_text(new_content)
-        return f"Replaced 1 occurrence in {path}"
+        # Exact match failed — try fuzzy matching
+        # This handles whitespace/indentation mismatches from local LLMs
+        match_result = self._fuzzy_find(content, old_string)
+        if match_result:
+            actual_text, similarity = match_result
+            new_content = content.replace(actual_text, new_string, 1)
+            resolved.write_text(new_content)
+            return f"Replaced 1 occurrence in {path} (fuzzy match, {similarity:.0%} similar)"
+
+        return f"String not found in {path} (exact and fuzzy match failed)"
+
+    def _fuzzy_find(self, content: str, search: str) -> tuple[str, float] | None:
+        """Find the closest match to search string in content using fuzzy matching.
+
+        Returns (actual_text, similarity_ratio) or None if no good match found.
+        """
+        search_lines = search.splitlines()
+        content_lines = content.splitlines()
+        n_search = len(search_lines)
+
+        if n_search == 0:
+            return None
+
+        best_match = None
+        best_ratio = 0.0
+
+        # Slide a window of search_lines length over content_lines
+        for i in range(len(content_lines) - n_search + 1):
+            window = content_lines[i:i + n_search]
+            window_text = "\n".join(window)
+
+            # Quick length check to avoid expensive comparison
+            len_ratio = len(search) / max(len(window_text), 1)
+            if len_ratio < 0.5 or len_ratio > 2.0:
+                continue
+
+            ratio = difflib.SequenceMatcher(None, search, window_text).ratio()
+            if ratio > best_ratio:
+                best_ratio = ratio
+                best_match = window_text
+
+        if best_match and best_ratio >= FUZZY_MATCH_THRESHOLD:
+            return best_match, best_ratio
+
+        return None
 
     def _list_files(self, pattern: str) -> str:
         matches = sorted(self.working_dir.glob(pattern))

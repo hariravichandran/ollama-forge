@@ -1,10 +1,21 @@
-"""Ollama API client with streaming, tool calling, and model management."""
+"""Ollama API client with streaming, tool calling, and model management.
+
+Features:
+- Non-streaming and streaming chat/generate
+- Tool calling (function calling)
+- Structured output (JSON schema)
+- Multi-modal (image) input
+- Prompt caching via keep_alive
+- Model management (pull, delete, switch, list)
+"""
 
 from __future__ import annotations
 
+import base64
 import json
 import time
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any, Callable, Generator
 
 import requests
@@ -43,6 +54,7 @@ class OllamaClient:
         num_ctx: int = 8192,
         num_thread: int | None = None,
         num_batch: int = 2048,
+        keep_alive: str = "30m",
     ):
         self.model = model
         self.base_url = base_url.rstrip("/")
@@ -50,6 +62,7 @@ class OllamaClient:
         self.num_ctx = num_ctx
         self.num_thread = num_thread
         self.num_batch = num_batch
+        self.keep_alive = keep_alive  # Keep model in memory between requests
         self.stats = LLMStats()
 
     def is_available(self) -> bool:
@@ -156,6 +169,7 @@ class OllamaClient:
             "model": model or self.model,
             "prompt": prompt,
             "stream": False,
+            "keep_alive": self.keep_alive,
             "options": {
                 "temperature": temperature if temperature is not None else self.temperature,
                 "num_ctx": self.num_ctx,
@@ -211,6 +225,7 @@ class OllamaClient:
         tools: list[dict] | None = None,
         json_mode: bool = False,
         json_schema: dict | None = None,
+        images: list[str] | None = None,
         timeout: int = 300,
         temperature: float | None = None,
         model: str | None = None,
@@ -222,16 +237,23 @@ class OllamaClient:
             tools: Ollama tool definitions for function calling
             json_mode: If True, forces JSON output
             json_schema: If provided, forces output to match the JSON schema
+            images: List of image paths or base64 strings for vision models.
+                    Paths are auto-converted to base64.
             timeout: Request timeout in seconds
             temperature: Override temperature for this call
             model: Override model for this call
 
         Returns dict with: response, tokens, time_s, tool_calls (if any)
         """
+        # If images provided, add them to the last user message
+        if images:
+            messages = self._inject_images(messages, images)
+
         payload: dict[str, Any] = {
             "model": model or self.model,
             "messages": messages,
             "stream": False,
+            "keep_alive": self.keep_alive,
             "options": {
                 "temperature": temperature if temperature is not None else self.temperature,
                 "num_ctx": self.num_ctx,
@@ -289,14 +311,27 @@ class OllamaClient:
         self,
         messages: list[dict[str, str]],
         system: str = "",
+        tools: list[dict] | None = None,
+        images: list[str] | None = None,
         timeout: int = 300,
         model: str | None = None,
-    ) -> Generator[str, None, None]:
-        """Streaming chat — yields text chunks as they arrive."""
+    ) -> Generator[dict[str, Any], None, None]:
+        """Streaming chat — yields event dicts as they arrive.
+
+        Each yielded dict has a "type" key:
+        - {"type": "text", "content": "..."} — text token
+        - {"type": "tool_call", "tool_calls": [...]} — tool call request
+        - {"type": "done", "tokens": N, "time_s": N} — generation complete
+        - {"type": "error", "error": "..."} — error
+        """
+        if images:
+            messages = self._inject_images(messages, images)
+
         payload: dict[str, Any] = {
             "model": model or self.model,
             "messages": messages,
             "stream": True,
+            "keep_alive": self.keep_alive,
             "options": {
                 "temperature": self.temperature,
                 "num_ctx": self.num_ctx,
@@ -305,7 +340,11 @@ class OllamaClient:
         }
         if self.num_thread:
             payload["options"]["num_thread"] = self.num_thread
+        if tools:
+            payload["tools"] = tools
 
+        start = time.time()
+        total_tokens = 0
         try:
             r = requests.post(
                 f"{self.base_url}/api/chat",
@@ -317,11 +356,105 @@ class OllamaClient:
                 if line:
                     data = json.loads(line)
                     msg = data.get("message", {})
+
+                    # Text content
                     content = msg.get("content", "")
                     if content:
-                        yield content
+                        yield {"type": "text", "content": content}
+
+                    # Tool calls
+                    if msg.get("tool_calls"):
+                        yield {"type": "tool_call", "tool_calls": msg["tool_calls"]}
+
+                    # Done signal
+                    if data.get("done"):
+                        total_tokens = data.get("eval_count", 0)
+                        elapsed = time.time() - start
+                        self.stats.total_calls += 1
+                        self.stats.total_tokens += total_tokens
+                        self.stats.total_time_s += elapsed
+                        yield {
+                            "type": "done",
+                            "tokens": total_tokens,
+                            "time_s": round(elapsed, 2),
+                            "tokens_per_sec": round(total_tokens / max(0.01, elapsed), 1),
+                        }
         except (requests.ConnectionError, requests.Timeout) as e:
-            yield f"\n[Error: {e}]"
+            yield {"type": "error", "error": str(e)}
+
+    def show_model(self, model: str | None = None) -> dict[str, Any]:
+        """Get model details (parameters, template, capabilities).
+
+        Useful for checking if a model supports vision, tools, etc.
+        """
+        try:
+            r = requests.post(
+                f"{self.base_url}/api/show",
+                json={"name": model or self.model},
+                timeout=10,
+            )
+            if r.status_code == 200:
+                return r.json()
+        except (requests.ConnectionError, requests.Timeout):
+            pass
+        return {}
+
+    def warmup(self, system: str = "") -> bool:
+        """Pre-warm the KV cache by sending the system prompt with no generation.
+
+        This pre-computes the KV cache for the system prompt so subsequent
+        requests that share the same prefix are faster.
+        """
+        payload: dict[str, Any] = {
+            "model": self.model,
+            "prompt": system or "You are a helpful assistant.",
+            "stream": False,
+            "keep_alive": self.keep_alive,
+            "options": {
+                "num_predict": 1,  # Generate minimal tokens — just warm the cache
+                "num_ctx": self.num_ctx,
+            },
+        }
+        try:
+            r = requests.post(
+                f"{self.base_url}/api/generate",
+                json=payload,
+                timeout=60,
+            )
+            if r.status_code == 200:
+                log.info("Warmed KV cache for %s", self.model)
+                return True
+        except (requests.ConnectionError, requests.Timeout):
+            pass
+        return False
+
+    def _inject_images(
+        self, messages: list[dict[str, Any]], images: list[str],
+    ) -> list[dict[str, Any]]:
+        """Inject base64-encoded images into the last user message.
+
+        Accepts file paths or raw base64 strings.
+        """
+        encoded = []
+        for img in images:
+            if Path(img).exists():
+                # File path — read and encode
+                encoded.append(base64.b64encode(Path(img).read_bytes()).decode("utf-8"))
+            else:
+                # Assume already base64
+                encoded.append(img)
+
+        if not encoded:
+            return messages
+
+        # Find last user message and add images
+        messages = [dict(m) for m in messages]  # shallow copy
+        for i in range(len(messages) - 1, -1, -1):
+            if messages[i].get("role") == "user":
+                messages[i]["images"] = encoded
+                break
+
+        return messages
 
     def switch_model(self, model: str) -> bool:
         """Switch to a different model, pulling it if necessary."""

@@ -1,23 +1,43 @@
-"""Git tool: repository operations for agents."""
+"""Git tool: repository operations for agents.
+
+Includes auto-commit, undo, branch management, and LLM-generated commit messages.
+Agents can make changes and auto-commit with descriptive messages, and users
+can undo agent commits with a single command.
+"""
 
 from __future__ import annotations
 
 import subprocess
-from typing import Any
+from typing import Any, TYPE_CHECKING
 
 from forge.utils.logging import get_logger
 
+if TYPE_CHECKING:
+    from forge.llm.client import OllamaClient
+
 log = get_logger("tools.git")
+
+# Tag prefix for agent-generated commits (used by undo)
+AGENT_COMMIT_TAG = "[forge]"
 
 
 class GitTool:
-    """Git operations for agents."""
+    """Git operations for agents.
+
+    Features:
+    - Basic: status, diff, log, commit
+    - Auto-commit: stage + commit with LLM-generated message after edits
+    - Undo: revert the last agent commit safely (git revert, not reset)
+    - Branch: create/switch branches per task
+    - Stash: save/restore work in progress
+    """
 
     name = "git"
-    description = "Git repository operations (status, diff, log, commit)"
+    description = "Git repository operations (status, diff, log, commit, undo, branch)"
 
-    def __init__(self, working_dir: str = "."):
+    def __init__(self, working_dir: str = ".", client: "OllamaClient | None" = None):
         self.working_dir = working_dir
+        self.client = client
 
     def get_tool_definitions(self) -> list[dict[str, Any]]:
         """Return Ollama tool-calling definitions."""
@@ -61,7 +81,7 @@ class GitTool:
                 "type": "function",
                 "function": {
                     "name": "git_commit",
-                    "description": "Stage and commit changes",
+                    "description": "Stage and commit changes with a descriptive message",
                     "parameters": {
                         "type": "object",
                         "properties": {
@@ -69,6 +89,43 @@ class GitTool:
                             "files": {"type": "array", "items": {"type": "string"}, "description": "Files to stage (default: all modified)"},
                         },
                         "required": ["message"],
+                    },
+                },
+            },
+            {
+                "type": "function",
+                "function": {
+                    "name": "git_undo",
+                    "description": "Undo the last agent-made commit using git revert (safe, creates a new commit)",
+                    "parameters": {"type": "object", "properties": {}},
+                },
+            },
+            {
+                "type": "function",
+                "function": {
+                    "name": "git_create_branch",
+                    "description": "Create and switch to a new branch for a task",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "name": {"type": "string", "description": "Branch name (e.g., 'fix/auth-bug')"},
+                        },
+                        "required": ["name"],
+                    },
+                },
+            },
+            {
+                "type": "function",
+                "function": {
+                    "name": "git_stash",
+                    "description": "Stash or restore work in progress",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "action": {"type": "string", "enum": ["save", "pop", "list"], "description": "Stash action"},
+                            "message": {"type": "string", "description": "Stash message (for save)"},
+                        },
+                        "required": ["action"],
                     },
                 },
             },
@@ -81,6 +138,9 @@ class GitTool:
             "git_diff": self._diff,
             "git_log": self._log,
             "git_commit": self._commit,
+            "git_undo": self._undo,
+            "git_create_branch": self._create_branch,
+            "git_stash": self._stash,
         }
         handler = handlers.get(function_name)
         if not handler:
@@ -117,7 +177,7 @@ class GitTool:
         return self._run_git(*args)
 
     def _log(self, count: int = 10) -> str:
-        return self._run_git("log", f"--oneline", f"-{count}")
+        return self._run_git("log", "--oneline", f"-{count}")
 
     def _commit(self, message: str, files: list[str] | None = None) -> str:
         if files:
@@ -126,4 +186,125 @@ class GitTool:
         else:
             self._run_git("add", "-A")
 
-        return self._run_git("commit", "-m", message)
+        # Tag agent commits for undo tracking
+        full_message = f"{AGENT_COMMIT_TAG} {message}"
+        return self._run_git("commit", "-m", full_message)
+
+    def _undo(self) -> str:
+        """Undo the last agent commit using git revert (safe).
+
+        Only reverts commits tagged with AGENT_COMMIT_TAG.
+        """
+        # Find the last agent commit
+        log_output = self._run_git("log", "--oneline", "-20")
+        for line in log_output.splitlines():
+            if AGENT_COMMIT_TAG in line:
+                commit_hash = line.split()[0]
+                result = self._run_git("revert", "--no-edit", commit_hash)
+                return f"Reverted agent commit {commit_hash}: {result}"
+
+        return "No agent commits found to undo"
+
+    def _create_branch(self, name: str) -> str:
+        """Create and switch to a new branch."""
+        result = self._run_git("checkout", "-b", name)
+        return result
+
+    def _stash(self, action: str, message: str = "") -> str:
+        """Stash operations."""
+        if action == "save":
+            args = ["stash", "push"]
+            if message:
+                args.extend(["-m", message])
+            return self._run_git(*args)
+        elif action == "pop":
+            return self._run_git("stash", "pop")
+        elif action == "list":
+            return self._run_git("stash", "list")
+        return f"Unknown stash action: {action}"
+
+    # --- Auto-commit workflow ---
+
+    def auto_commit(self, files_changed: list[str], description: str = "") -> str:
+        """Auto-commit changes with an LLM-generated commit message.
+
+        Args:
+            files_changed: List of file paths that were modified.
+            description: Brief description of what was changed (helps LLM).
+
+        Returns:
+            Commit result string.
+        """
+        # Check if there are actual changes
+        status = self._status()
+        if "nothing to commit" in status.lower() or status == "(no output)":
+            return "Nothing to commit"
+
+        # Generate commit message
+        message = self._generate_commit_message(files_changed, description)
+
+        # Stage specific files
+        for f in files_changed:
+            self._run_git("add", f)
+
+        # Commit with agent tag
+        full_message = f"{AGENT_COMMIT_TAG} {message}"
+        result = self._run_git("commit", "-m", full_message)
+        log.info("Auto-committed: %s", message)
+        return result
+
+    def _generate_commit_message(self, files_changed: list[str], description: str) -> str:
+        """Generate a commit message using LLM or from description."""
+        if not self.client:
+            # No LLM — use description or generic message
+            if description:
+                return description[:72]
+            return f"Update {', '.join(f[:30] for f in files_changed[:3])}"
+
+        # Get the diff for context
+        diff = self._run_git("diff", "--cached", "--stat")
+        if diff == "(no output)":
+            # Stage first to get diff
+            for f in files_changed:
+                self._run_git("add", f)
+            diff = self._run_git("diff", "--cached", "--stat")
+
+        prompt = (
+            f"Write a concise git commit message (max 72 chars first line) for these changes.\n"
+            f"Files: {', '.join(files_changed)}\n"
+            f"Description: {description}\n"
+            f"Diff stats:\n{diff}\n\n"
+            f"Reply with ONLY the commit message, no quotes or explanation."
+        )
+
+        try:
+            result = self.client.generate(
+                prompt=prompt,
+                system="You write concise, conventional git commit messages. Use imperative mood (e.g., 'Add feature', 'Fix bug'). Max 72 chars first line.",
+                timeout=30,
+                temperature=0.3,
+            )
+            message = result.get("response", "").strip()
+            # Clean up: remove quotes, limit length
+            message = message.strip('"\'')
+            first_line = message.splitlines()[0][:72] if message else ""
+            return first_line or description[:72] or "Update files"
+        except Exception:
+            return description[:72] if description else "Update files"
+
+    def get_current_branch(self) -> str:
+        """Get the current branch name."""
+        return self._run_git("rev-parse", "--abbrev-ref", "HEAD")
+
+    def has_uncommitted_changes(self) -> bool:
+        """Check if there are uncommitted changes."""
+        status = self._run_git("status", "--porcelain")
+        return bool(status and status != "(no output)")
+
+    def get_agent_commits(self, count: int = 10) -> list[str]:
+        """Get recent agent-made commits."""
+        log_output = self._run_git("log", "--oneline", f"-{count * 2}")
+        return [
+            line for line in log_output.splitlines()
+            if AGENT_COMMIT_TAG in line
+        ][:count]

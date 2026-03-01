@@ -36,10 +36,11 @@ class MockOllamaClient:
     def chat(self, messages, tools=None, temperature=0.7, timeout=300):
         return {"response": self._response, "tokens": 10, "time_s": 0.5}
 
-    def stream_chat(self, messages, system="", timeout=300, model=None):
-        yield "Mock "
-        yield "streamed "
-        yield "response"
+    def stream_chat(self, messages, system="", tools=None, images=None, timeout=300, model=None):
+        yield {"type": "text", "content": "Mock "}
+        yield {"type": "text", "content": "streamed "}
+        yield {"type": "text", "content": "response"}
+        yield {"type": "done", "tokens": 10, "time_s": 0.5, "tokens_per_sec": 20.0}
 
     def generate(self, prompt, system="", json_mode=False, temperature=0.7, timeout=300):
         return {"response": self._response, "tokens": 10, "time_s": 0.5}
@@ -717,3 +718,476 @@ class TestTaskManager:
         status = tm.get_status(task_id2)
         assert status.status == TaskStatus.FAILED
         assert "Too many" in status.error
+
+
+# ─── Codebase Indexer Tests ─────────────────────────────────────────────────
+
+
+class TestCodebaseIndexer:
+    """Tests for the codebase indexing and search system."""
+
+    def test_index_python_file(self):
+        from forge.tools.codebase import CodebaseIndexer
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            # Create a Python file
+            py_file = Path(tmpdir) / "example.py"
+            py_file.write_text(
+                'class UserAuth:\n'
+                '    """Handles user authentication."""\n'
+                '    def login(self, username: str, password: str) -> bool:\n'
+                '        """Authenticate a user."""\n'
+                '        return True\n'
+                '\n'
+                'def helper_function(x: int) -> str:\n'
+                '    return str(x)\n'
+            )
+
+            indexer = CodebaseIndexer(tmpdir)
+            stats = indexer.build_index()
+
+            assert stats["files"] >= 1
+            assert stats["symbols"] >= 3  # class + method + function
+
+    def test_search_by_symbol(self):
+        from forge.tools.codebase import CodebaseIndexer
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            py_file = Path(tmpdir) / "auth.py"
+            py_file.write_text(
+                'class AuthManager:\n'
+                '    def validate_token(self, token: str) -> bool:\n'
+                '        return True\n'
+            )
+
+            indexer = CodebaseIndexer(tmpdir)
+            indexer.build_index()
+
+            results = indexer.search("AuthManager")
+            assert len(results) > 0
+            assert any(r.symbol == "AuthManager" for r in results)
+
+    def test_search_by_content(self):
+        from forge.tools.codebase import CodebaseIndexer
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            py_file = Path(tmpdir) / "config.py"
+            py_file.write_text('DATABASE_URL = "postgresql://localhost/mydb"\n')
+
+            indexer = CodebaseIndexer(tmpdir)
+            indexer.build_index()
+
+            results = indexer.search("DATABASE_URL")
+            assert len(results) > 0
+
+    def test_find_symbol(self):
+        from forge.tools.codebase import CodebaseIndexer
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            py_file = Path(tmpdir) / "utils.py"
+            py_file.write_text(
+                'def format_date(dt):\n    return str(dt)\n'
+                'def format_time(t):\n    return str(t)\n'
+            )
+
+            indexer = CodebaseIndexer(tmpdir)
+            indexer.build_index()
+
+            syms = indexer.find_symbol("format_date")
+            assert len(syms) == 1
+            assert syms[0].kind == "function"
+
+    def test_incremental_update(self):
+        from forge.tools.codebase import CodebaseIndexer
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            # Build initial index
+            f1 = Path(tmpdir) / "a.py"
+            f1.write_text("def foo(): pass\n")
+
+            indexer = CodebaseIndexer(tmpdir)
+            indexer.build_index()
+            assert indexer.find_symbol("foo")
+
+            # Add a new file
+            f2 = Path(tmpdir) / "b.py"
+            f2.write_text("def bar(): pass\n")
+
+            stats = indexer.update_index()
+            assert stats["added"] == 1
+            assert indexer.find_symbol("bar")
+
+    def test_persistence(self):
+        from forge.tools.codebase import CodebaseIndexer
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            f1 = Path(tmpdir) / "mod.py"
+            f1.write_text("class MyModel:\n    pass\n")
+
+            # Build and save
+            idx1 = CodebaseIndexer(tmpdir)
+            idx1.build_index()
+            assert idx1.find_symbol("MyModel")
+
+            # Load from disk
+            idx2 = CodebaseIndexer(tmpdir)
+            assert idx2.find_symbol("MyModel")
+
+    def test_project_overview(self):
+        from forge.tools.codebase import CodebaseIndexer
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            f1 = Path(tmpdir) / "main.py"
+            f1.write_text("def main(): pass\n")
+            f2 = Path(tmpdir) / "utils.py"
+            f2.write_text("def helper(): pass\n")
+
+            indexer = CodebaseIndexer(tmpdir)
+            indexer.build_index()
+            overview = indexer.get_project_overview()
+            assert "python" in overview.lower()
+            assert "2" in overview  # 2 files
+
+    def test_js_symbol_extraction(self):
+        from forge.tools.codebase import CodebaseIndexer
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            js_file = Path(tmpdir) / "app.js"
+            js_file.write_text(
+                'function handleRequest(req, res) {\n'
+                '  return res.json({ok: true});\n'
+                '}\n'
+                'class Router {\n'
+                '  constructor() {}\n'
+                '}\n'
+            )
+
+            indexer = CodebaseIndexer(tmpdir)
+            indexer.build_index()
+
+            assert indexer.find_symbol("handleRequest")
+            assert indexer.find_symbol("Router")
+
+    def test_gitignore_respect(self):
+        from forge.tools.codebase import CodebaseIndexer
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            # Create gitignore
+            gitignore = Path(tmpdir) / ".gitignore"
+            gitignore.write_text("secret.py\n")
+
+            # Create files
+            visible = Path(tmpdir) / "visible.py"
+            visible.write_text("def public(): pass\n")
+            secret = Path(tmpdir) / "secret.py"
+            secret.write_text("API_KEY = 'secret123'\n")
+
+            indexer = CodebaseIndexer(tmpdir)
+            indexer.build_index()
+
+            # Should find visible but not secret
+            assert indexer.find_symbol("public")
+            results = indexer.search("API_KEY")
+            assert len(results) == 0
+
+
+# ─── Sandbox Tests ──────────────────────────────────────────────────────────
+
+
+class TestSandbox:
+    """Tests for sandboxed code execution."""
+
+    def test_run_python_success(self):
+        from forge.tools.sandbox import Sandbox
+
+        sandbox = Sandbox(timeout=10)
+        result = sandbox.run_python("print('hello world')")
+        assert result.success
+        assert "hello world" in result.stdout
+
+    def test_run_python_error(self):
+        from forge.tools.sandbox import Sandbox
+
+        sandbox = Sandbox(timeout=10)
+        result = sandbox.run_python("raise ValueError('test error')")
+        assert not result.success
+        assert result.return_code != 0
+
+    def test_run_python_timeout(self):
+        from forge.tools.sandbox import Sandbox
+
+        sandbox = Sandbox(timeout=2)
+        result = sandbox.run_python("import time; time.sleep(10)")
+        assert not result.success
+        assert result.timed_out
+
+    def test_run_python_with_files(self):
+        from forge.tools.sandbox import Sandbox
+
+        sandbox = Sandbox(timeout=10)
+        result = sandbox.run_python(
+            "data = open('input.txt').read(); print(data)",
+            files={"input.txt": "hello from file"},
+        )
+        assert result.success
+        assert "hello from file" in result.stdout
+
+    def test_run_command(self):
+        from forge.tools.sandbox import Sandbox
+
+        sandbox = Sandbox(timeout=10)
+        result = sandbox.run_command("echo 'test output'")
+        assert result.success
+        assert "test output" in result.stdout
+
+    def test_execution_result_output(self):
+        from forge.tools.sandbox import ExecutionResult
+
+        result = ExecutionResult(stdout="out", stderr="err", return_code=0, duration_s=1.0)
+        assert result.success
+        assert "out" in result.output
+        assert "err" in result.output
+
+    def test_execution_result_failure(self):
+        from forge.tools.sandbox import ExecutionResult
+
+        result = ExecutionResult(stdout="", stderr="", return_code=1, duration_s=1.0)
+        assert not result.success
+
+    def test_sandbox_tool_interface(self):
+        from forge.tools.sandbox import SandboxTool
+
+        tool = SandboxTool()
+        defs = tool.get_tool_definitions()
+        assert len(defs) == 2
+        names = [d["function"]["name"] for d in defs]
+        assert "run_code" in names
+        assert "run_shell" in names
+
+    def test_sandbox_tool_execute(self):
+        from forge.tools.sandbox import SandboxTool
+
+        tool = SandboxTool()
+        result = tool.execute("run_code", {"code": "print(2 + 2)"})
+        assert "4" in result
+        assert "OK" in result
+
+    def test_sandbox_cleanup(self):
+        """Verify temp directory is cleaned up after execution."""
+        from forge.tools.sandbox import Sandbox
+        import os
+
+        sandbox = Sandbox(timeout=10)
+        result = sandbox.run_python("import os; print(os.getcwd())")
+        assert result.success
+        # The temp dir should be cleaned up
+        tmpdir = result.stdout.strip()
+        assert not os.path.exists(tmpdir)
+
+
+# ─── Fuzzy Edit Tests ──────────────────────────────────────────────────────
+
+
+class TestFuzzyEdit:
+    """Tests for fuzzy matching in file edits."""
+
+    def test_exact_match(self):
+        from forge.tools.filesystem import FilesystemTool
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            f = Path(tmpdir) / "test.py"
+            f.write_text("def hello():\n    print('hello')\n")
+
+            tool = FilesystemTool(working_dir=tmpdir)
+            result = tool._edit_file("test.py", "print('hello')", "print('world')")
+            assert "Replaced 1 occurrence" in result
+            assert "world" in f.read_text()
+
+    def test_fuzzy_match_whitespace(self):
+        from forge.tools.filesystem import FilesystemTool
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            f = Path(tmpdir) / "test.py"
+            f.write_text("def hello():\n    print('hello')\n    return True\n")
+
+            tool = FilesystemTool(working_dir=tmpdir)
+            # Search with slightly different whitespace
+            result = tool._edit_file(
+                "test.py",
+                "def hello():\n  print('hello')\n  return True",  # 2 spaces vs 4
+                "def hello():\n    print('world')\n    return True",
+            )
+            assert "fuzzy match" in result.lower() or "Replaced" in result
+
+    def test_fuzzy_find_method(self):
+        from forge.tools.filesystem import FilesystemTool
+
+        tool = FilesystemTool()
+        content = "line 1\nline 2\nline 3\nline 4\n"
+        # Search for something similar to line 2-3
+        result = tool._fuzzy_find(content, "line 2\nline 3")
+        assert result is not None
+        actual, ratio = result
+        assert ratio >= 0.75
+
+    def test_fuzzy_no_match(self):
+        from forge.tools.filesystem import FilesystemTool
+
+        tool = FilesystemTool()
+        content = "completely different text here\n"
+        result = tool._fuzzy_find(content, "nothing like this at all exists")
+        assert result is None
+
+    def test_edit_file_not_found(self):
+        from forge.tools.filesystem import FilesystemTool
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tool = FilesystemTool(working_dir=tmpdir)
+            result = tool._edit_file("nonexistent.py", "old", "new")
+            assert "not found" in result.lower()
+
+
+# ─── Git Tool Tests ─────────────────────────────────────────────────────────
+
+
+class TestGitTool:
+    """Tests for the enhanced git tool."""
+
+    def test_git_tool_definitions(self):
+        from forge.tools.git import GitTool
+
+        tool = GitTool()
+        defs = tool.get_tool_definitions()
+        names = [d["function"]["name"] for d in defs]
+        assert "git_status" in names
+        assert "git_undo" in names
+        assert "git_create_branch" in names
+        assert "git_stash" in names
+
+    def test_agent_commit_tag(self):
+        from forge.tools.git import AGENT_COMMIT_TAG
+        assert "[forge]" in AGENT_COMMIT_TAG
+
+    def test_execute_unknown_function(self):
+        from forge.tools.git import GitTool
+
+        tool = GitTool()
+        result = tool.execute("unknown_function", {})
+        assert "Unknown function" in result
+
+    def test_generate_commit_message_no_client(self):
+        from forge.tools.git import GitTool
+
+        tool = GitTool(client=None)
+        msg = tool._generate_commit_message(["file1.py", "file2.py"], "Fix bug")
+        assert msg == "Fix bug"
+
+    def test_generate_commit_message_with_client(self):
+        from forge.tools.git import GitTool
+
+        client = MockOllamaClient(response="Fix authentication bug in login flow")
+        tool = GitTool(client=client)
+        msg = tool._generate_commit_message(["auth.py"], "fix auth")
+        assert len(msg) <= 72
+        assert msg  # non-empty
+
+
+# ─── LLM Client Enhancement Tests ──────────────────────────────────────────
+
+
+class TestLLMClientEnhancements:
+    """Tests for the enhanced LLM client features."""
+
+    def test_keep_alive_default(self):
+        from forge.llm.client import OllamaClient
+
+        client = OllamaClient()
+        assert client.keep_alive == "30m"
+
+    def test_keep_alive_custom(self):
+        from forge.llm.client import OllamaClient
+
+        client = OllamaClient(keep_alive="1h")
+        assert client.keep_alive == "1h"
+
+    def test_image_injection_with_base64(self):
+        from forge.llm.client import OllamaClient
+
+        client = OllamaClient()
+        messages = [{"role": "user", "content": "What's in this image?"}]
+        result = client._inject_images(messages, ["dGVzdA=="])  # base64 "test"
+        assert "images" in result[-1]
+        assert result[-1]["images"] == ["dGVzdA=="]
+
+    def test_image_injection_preserves_messages(self):
+        from forge.llm.client import OllamaClient
+
+        client = OllamaClient()
+        messages = [
+            {"role": "system", "content": "You are helpful."},
+            {"role": "user", "content": "Hello"},
+        ]
+        result = client._inject_images(messages, ["img1"])
+        assert result[0].get("role") == "system"
+        assert "images" not in result[0]
+        assert "images" in result[1]
+
+    def test_image_injection_with_file(self):
+        from forge.llm.client import OllamaClient
+
+        with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as f:
+            f.write(b"fake image data")
+            f.flush()
+
+            client = OllamaClient()
+            messages = [{"role": "user", "content": "Describe this"}]
+            result = client._inject_images(messages, [f.name])
+            assert "images" in result[-1]
+            # Should be base64 encoded
+            import base64
+            decoded = base64.b64decode(result[-1]["images"][0])
+            assert decoded == b"fake image data"
+
+            import os
+            os.unlink(f.name)
+
+    def test_stream_chat_signature(self):
+        """Verify stream_chat accepts new parameters."""
+        from forge.llm.client import OllamaClient
+        import inspect
+
+        sig = inspect.signature(OllamaClient.stream_chat)
+        assert "tools" in sig.parameters
+        assert "images" in sig.parameters
+
+    def test_chat_images_parameter(self):
+        """Verify chat accepts images parameter."""
+        from forge.llm.client import OllamaClient
+        import inspect
+
+        sig = inspect.signature(OllamaClient.chat)
+        assert "images" in sig.parameters
+
+    def test_llm_stats(self):
+        from forge.llm.client import LLMStats
+
+        stats = LLMStats(total_calls=10, total_tokens=1000, total_time_s=5.0)
+        assert stats.avg_time_s == 0.5
+        assert stats.avg_tokens_per_sec == 200.0
+
+
+# ─── Tools Registration Tests ──────────────────────────────────────────────
+
+
+class TestToolsRegistration:
+    """Tests for tool registration and discovery."""
+
+    def test_builtin_tools_include_sandbox(self):
+        from forge.tools import BUILTIN_TOOLS
+        assert "sandbox" in BUILTIN_TOOLS
+
+    def test_sandbox_tool_class(self):
+        from forge.tools import SandboxTool
+        tool = SandboxTool()
+        assert tool.name == "sandbox"
+        assert tool.sandbox is not None

@@ -33,7 +33,8 @@ def main(ctx):
 @click.option("--working-dir", "-d", default=".", help="Working directory for file operations")
 @click.option("--cascade", is_flag=True, help="Enable cascading: auto-switch to bigger model when stuck")
 @click.option("--auto-approve", is_flag=True, help="Auto-approve all tool actions (skip permission prompts)")
-def chat(model: str, agent: str, working_dir: str, cascade: bool, auto_approve: bool):
+@click.option("--image", "-i", multiple=True, help="Image file(s) to include (for vision models)")
+def chat(model: str, agent: str, working_dir: str, cascade: bool, auto_approve: bool, image: tuple):
     """Start an interactive chat session."""
     from forge.config import load_config
     from forge.hardware import detect_hardware, select_profile
@@ -761,6 +762,126 @@ def init_rules(directory: str):
 
     result = create_rules_template(directory)
     console.print(f"[green]{result}[/green]")
+
+
+# ─── Codebase Indexing ──────────────────────────────────────────────────────
+
+
+@main.command()
+@click.option("--dir", "-d", "directory", default=".", help="Project directory to index")
+@click.option("--summaries", is_flag=True, help="Generate LLM summaries for each file (slow)")
+@click.option("--update", is_flag=True, help="Incremental update (only changed files)")
+def index(directory: str, summaries: bool, update: bool):
+    """Index the codebase for fast search and agent context retrieval.
+
+    \b
+    Creates a .forge/index/ directory with symbol and file metadata.
+    Agents use this to find relevant code without manual file specification.
+    """
+    from forge.tools.codebase import CodebaseIndexer
+
+    client = None
+    if summaries:
+        from forge.config import load_config
+        from forge.hardware import detect_hardware, select_profile
+        from forge.llm.client import OllamaClient
+
+        config = load_config()
+        hw = detect_hardware()
+        profile = select_profile(hw)
+        client = OllamaClient(
+            model=config.default_model or profile.recommended_model,
+            num_ctx=profile.num_ctx,
+        )
+
+    indexer = CodebaseIndexer(project_dir=directory, client=client)
+
+    if update:
+        with console.status("Updating index...", spinner="dots"):
+            stats = indexer.update_index()
+        console.print(
+            f"[green]Index updated:[/green] "
+            f"{stats['added']} added, {stats['updated']} updated, {stats['removed']} removed"
+        )
+    else:
+        with console.status("Building index...", spinner="dots"):
+            stats = indexer.build_index(generate_summaries=summaries)
+        console.print(
+            f"[green]Index built:[/green] {stats['files']} files, "
+            f"{stats['symbols']} symbols in {stats['duration_s']}s"
+        )
+
+    # Show overview
+    console.print(f"\n{indexer.get_project_overview(max_files=20)}")
+
+
+@main.command()
+@click.argument("query", nargs=-1)
+@click.option("--dir", "-d", "directory", default=".", help="Project directory")
+@click.option("--max-results", "-n", default=10, help="Maximum results")
+def search(query: tuple, directory: str, max_results: int):
+    """Search the codebase index for symbols, files, or content."""
+    from forge.tools.codebase import CodebaseIndexer
+
+    query_str = " ".join(query)
+    if not query_str:
+        console.print("Usage: forge search <query>")
+        return
+
+    indexer = CodebaseIndexer(project_dir=directory)
+    results = indexer.search(query_str, max_results=max_results)
+
+    if not results:
+        console.print(f"No results for '{query_str}'. Run 'forge index' first if you haven't.")
+        return
+
+    table = Table(title=f"Search: {query_str}")
+    table.add_column("Score", style="dim", width=5)
+    table.add_column("File", style="cyan")
+    table.add_column("Line", style="dim", width=5)
+    table.add_column("Match")
+
+    for r in results:
+        table.add_row(
+            f"{r.score:.1f}",
+            r.file,
+            str(r.line),
+            r.content[:80],
+        )
+    console.print(table)
+
+
+# ─── Undo ───────────────────────────────────────────────────────────────────
+
+
+@main.command()
+@click.option("--dir", "-d", "directory", default=".", help="Working directory")
+def undo(directory: str):
+    """Undo the last agent-made commit (safe revert, creates a new commit).
+
+    \b
+    Only reverts commits tagged with [forge]. Human commits are never touched.
+    """
+    from forge.tools.git import GitTool
+
+    git = GitTool(working_dir=directory)
+
+    # Show recent agent commits
+    agent_commits = git.get_agent_commits(5)
+    if not agent_commits:
+        console.print("No agent commits found to undo.")
+        return
+
+    console.print("[bold]Recent agent commits:[/bold]")
+    for c in agent_commits:
+        console.print(f"  {c}")
+
+    # Confirm
+    if click.confirm("\nRevert the most recent agent commit?"):
+        result = git._undo()
+        console.print(f"[green]{result}[/green]")
+    else:
+        console.print("Cancelled.")
 
 
 if __name__ == "__main__":
