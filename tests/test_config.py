@@ -116,3 +116,28 @@ class TestSaveConfig:
         # This tests the function signature, not the side effect
         # (we don't want to write to the real config dir in tests)
         assert callable(save_config)
+
+
+class TestConfigAttributes:
+    """Tests for config attribute types and validation."""
+
+    def test_all_fields_have_defaults(self):
+        """Every config field should have a default value."""
+        config = ForgeConfig()
+        for key, value in config.__dict__.items():
+            if key.startswith("_"):
+                continue
+            assert value is not None, f"{key} has no default"
+
+    def test_bool_fields(self):
+        """Boolean fields should be actual bools."""
+        config = ForgeConfig()
+        assert isinstance(config.web_search_enabled, bool)
+        assert isinstance(config.self_improve_enabled, bool)
+        assert isinstance(config.self_improve_maintainer, bool)
+
+    def test_int_fields(self):
+        """Integer fields should be actual ints."""
+        config = ForgeConfig()
+        assert isinstance(config.max_context_tokens, int)
+        assert isinstance(config.web_port, int)

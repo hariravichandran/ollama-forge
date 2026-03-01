@@ -714,11 +714,22 @@ def self_improve(iterations: int, enable: bool, maintainer: bool):
 
 
 @main.command()
-def benchmark():
-    """Run a hardware benchmark for model recommendations."""
+@click.option("--models", "-m", multiple=True, help="Models to benchmark (default: recommended model)")
+@click.option("--no-warmup", is_flag=True, help="Skip warmup request before benchmarking")
+def benchmark(models: tuple, no_warmup: bool):
+    """Run standardized benchmarks against one or more models.
+
+    \b
+    Tests speed, latency, and response quality across coding,
+    reasoning, and general knowledge prompts.
+
+    Example:
+        forge benchmark
+        forge benchmark -m qwen2.5-coder:3b -m qwen2.5-coder:7b
+    """
     from forge.hardware import detect_hardware, select_profile
     from forge.llm.client import OllamaClient
-    import time
+    from forge.llm.benchmark import run_benchmark, format_benchmark_report
 
     hw = detect_hardware()
     profile = select_profile(hw)
@@ -735,43 +746,41 @@ def benchmark():
         console.print("[red]Ollama is not running.[/red]")
         return
 
-    # Check if recommended model is available
-    models = [m.get("name", "") for m in client.list_models()]
-    if profile.recommended_model not in models:
-        console.print(f"Model {profile.recommended_model} not installed. Pull it first:")
-        console.print(f"  forge models pull {profile.recommended_model}")
-        return
+    # Determine which models to benchmark
+    model_list = list(models) if models else [profile.recommended_model]
 
-    console.print(f"\nBenchmarking [cyan]{profile.recommended_model}[/cyan]...\n")
+    # Check models are available
+    available = [m.get("name", "") for m in client.list_models()]
+    available_base = [n.split(":")[0] for n in available]
 
-    # Run a few test prompts
-    prompts = [
-        "Write a Python function to check if a number is prime.",
-        "Explain the difference between a list and a tuple in Python.",
-        "What is the time complexity of binary search?",
-    ]
+    for m in model_list:
+        m_base = m.split(":")[0]
+        if m not in available and m_base not in available_base:
+            console.print(f"[yellow]Model {m} not installed. Pull it first:[/yellow]")
+            console.print(f"  forge models pull {m}")
+            return
 
-    total_tokens = 0
-    total_time = 0.0
+    console.print(f"\nBenchmarking {len(model_list)} model(s): [cyan]{', '.join(model_list)}[/cyan]\n")
 
-    for prompt in prompts:
-        with console.status(f"Testing: {prompt[:50]}...", spinner="dots"):
-            result = client.generate(prompt, timeout=120)
+    def progress_cb(model, prompt_name, result):
+        if result is None:
+            console.print(f"  [dim]{model}: {prompt_name}...[/dim]", end="")
+        else:
+            status = f"{result.tokens} tok, {result.time_s}s, {result.tokens_per_sec} tok/s"
+            if result.error:
+                status = f"[red]ERROR: {result.error[:50]}[/red]"
+            console.print(f" {status}")
 
-        tokens = result.get("tokens", 0)
-        time_s = result.get("time_s", 0)
-        tps = result.get("tokens_per_sec", 0)
-        total_tokens += tokens
-        total_time += time_s
-        console.print(f"  {tokens} tokens in {time_s:.1f}s ({tps:.1f} tok/s)")
+    summaries = run_benchmark(
+        client=client,
+        models=model_list,
+        warmup=not no_warmup,
+        progress_cb=progress_cb,
+    )
 
-    avg_tps = total_tokens / max(0.01, total_time)
-    console.print(f"\n[bold]Average: {avg_tps:.1f} tokens/sec[/bold]")
-
-    if avg_tps < 5:
-        console.print("[yellow]Consider using a smaller model for better responsiveness.[/yellow]")
-    elif avg_tps > 20:
-        console.print("[green]Good performance! You could try a larger model.[/green]")
+    # Print formatted report
+    report = format_benchmark_report(summaries)
+    console.print(f"\n{report}")
 
 
 # ─── API Server ──────────────────────────────────────────────────────────────
@@ -1192,10 +1201,10 @@ def session_list(limit: int):
 
 @session.command("export")
 @click.argument("session_id")
-@click.option("--format", "-f", "fmt", default="markdown", type=click.Choice(["markdown", "json"]))
+@click.option("--format", "-f", "fmt", default="markdown", type=click.Choice(["markdown", "json", "html"]))
 @click.option("--output", "-o", default="", help="Output file (default: stdout)")
 def session_export(session_id: str, fmt: str, output: str):
-    """Export a chat session to markdown or JSON."""
+    """Export a chat session to markdown, JSON, or HTML."""
     from forge.agents.sessions import SessionManager
 
     mgr = SessionManager()
@@ -1321,6 +1330,102 @@ def compare(prompt: str, models: tuple, temperature: float):
             str(len(r["response"])),
         )
     console.print(table)
+
+
+# ─── Config ──────────────────────────────────────────────────────────────
+
+
+@main.group(invoke_without_command=True)
+@click.pass_context
+def config(ctx):
+    """View and manage ollama-forge configuration."""
+    if ctx.invoked_subcommand is None:
+        ctx.invoke(config_show)
+
+
+@config.command("show")
+def config_show():
+    """Show current configuration."""
+    from forge.config import load_config, CONFIG_FILE
+
+    cfg = load_config()
+
+    table = Table(title=f"Configuration ({CONFIG_FILE})")
+    table.add_column("Setting", style="cyan")
+    table.add_column("Value")
+
+    for key, value in cfg.__dict__.items():
+        if key.startswith("_"):
+            continue
+        style = ""
+        if isinstance(value, bool):
+            style = "green" if value else "dim"
+        table.add_row(key, str(value), style=style)
+    console.print(table)
+
+
+@config.command("set")
+@click.argument("key")
+@click.argument("value")
+def config_set(key: str, value: str):
+    """Set a configuration value.
+
+    \b
+    Examples:
+        forge config set default_model qwen2.5-coder:7b
+        forge config set web_search_enabled true
+        forge config set max_context_tokens 16384
+    """
+    from forge.config import load_config, save_config
+
+    cfg = load_config()
+    if not hasattr(cfg, key):
+        valid_keys = [k for k in cfg.__dict__ if not k.startswith("_")]
+        console.print(f"[red]Unknown setting: {key}[/red]")
+        console.print(f"Valid settings: {', '.join(valid_keys)}")
+        return
+
+    # Convert value to the correct type
+    current = getattr(cfg, key)
+    if isinstance(current, bool):
+        parsed = value.lower() not in ("0", "false", "no", "off")
+    elif isinstance(current, int):
+        try:
+            parsed = int(value)
+        except ValueError:
+            console.print(f"[red]Expected integer for {key}, got: {value}[/red]")
+            return
+    elif isinstance(current, float):
+        try:
+            parsed = float(value)
+        except ValueError:
+            console.print(f"[red]Expected number for {key}, got: {value}[/red]")
+            return
+    else:
+        parsed = value
+
+    setattr(cfg, key, parsed)
+    save_config(cfg)
+    console.print(f"[green]{key} = {parsed}[/green]")
+
+
+@config.command("reset")
+def config_reset():
+    """Reset configuration to defaults."""
+    from forge.config import ForgeConfig, save_config
+
+    if click.confirm("Reset all settings to defaults?"):
+        save_config(ForgeConfig())
+        console.print("[green]Configuration reset to defaults.[/green]")
+
+
+@config.command("path")
+def config_path():
+    """Show the configuration file path."""
+    from forge.config import CONFIG_FILE, CONFIG_DIR
+    console.print(f"Config dir:  {CONFIG_DIR}")
+    console.print(f"Config file: {CONFIG_FILE}")
+    console.print(f"Exists: {'yes' if CONFIG_FILE.exists() else 'no'}")
 
 
 if __name__ == "__main__":

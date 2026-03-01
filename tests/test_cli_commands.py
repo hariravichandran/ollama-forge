@@ -213,3 +213,35 @@ class TestSessionCommands:
                 )
             results = mgr.search("Python", limit=2)
             assert len(results) == 2
+
+    def test_session_export_html(self):
+        """Export as HTML should produce valid HTML."""
+        from forge.agents.sessions import SessionManager
+        with tempfile.TemporaryDirectory() as tmpdir:
+            mgr = SessionManager(sessions_dir=Path(tmpdir))
+            sid = mgr.save(
+                messages=[
+                    {"role": "user", "content": "Hello there"},
+                    {"role": "assistant", "content": "Hi! How can I help?"},
+                ],
+                agent_name="coder",
+                model="test:7b",
+            )
+            html = mgr.export(sid, format="html")
+            assert "<!DOCTYPE html>" in html
+            assert "Hello there" in html
+            assert "Hi! How can I help?" in html
+            assert "coder" in html
+
+    def test_session_export_html_escapes_content(self):
+        """HTML export should escape special characters."""
+        from forge.agents.sessions import SessionManager
+        with tempfile.TemporaryDirectory() as tmpdir:
+            mgr = SessionManager(sessions_dir=Path(tmpdir))
+            sid = mgr.save(
+                messages=[{"role": "user", "content": "<script>alert('xss')</script>"}],
+                agent_name="assistant",
+            )
+            html = mgr.export(sid, format="html")
+            assert "<script>" not in html
+            assert "&lt;script&gt;" in html

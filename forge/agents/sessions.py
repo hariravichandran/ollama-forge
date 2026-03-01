@@ -212,11 +212,11 @@ class SessionManager:
         return False
 
     def export(self, session_id: str, format: str = "markdown") -> str:
-        """Export a session as markdown or JSON.
+        """Export a session as markdown, JSON, or HTML.
 
         Args:
             session_id: Session to export.
-            format: "markdown" or "json".
+            format: "markdown", "json", or "html".
 
         Returns:
             Formatted string.
@@ -227,6 +227,9 @@ class SessionManager:
 
         if format == "json":
             return json.dumps(asdict(session), indent=2)
+
+        if format == "html":
+            return self._export_html(session)
 
         # Markdown format
         lines = [
@@ -252,6 +255,52 @@ class SessionManager:
             lines.append("")
 
         return "\n".join(lines)
+
+    def _export_html(self, session: Session) -> str:
+        """Export a session as a standalone HTML file."""
+        import html as html_mod
+        from datetime import datetime
+
+        created = datetime.fromtimestamp(session.created_at).strftime("%Y-%m-%d %H:%M")
+
+        messages_html = []
+        for msg in session.messages:
+            role = msg.get("role", "user")
+            content = html_mod.escape(msg.get("content", ""))
+            # Preserve newlines and code blocks
+            content = content.replace("\n", "<br>")
+            messages_html.append(
+                f'<div class="message {role}">'
+                f'<span class="role">{role}</span>'
+                f'<div class="content">{content}</div>'
+                f'</div>'
+            )
+
+        return f"""<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>{html_mod.escape(session.title)}</title>
+<style>
+body {{ font-family: system-ui, sans-serif; max-width: 800px; margin: 40px auto; padding: 0 20px; background: #1a1a2e; color: #e0e0e0; }}
+h1 {{ color: #00bfa6; }}
+.meta {{ color: #888; margin-bottom: 20px; }}
+.message {{ margin: 16px 0; padding: 12px 16px; border-radius: 8px; }}
+.message.user {{ background: #1e3a5f; border-left: 3px solid #4a9eff; }}
+.message.assistant {{ background: #1a3330; border-left: 3px solid #00bfa6; }}
+.message.system {{ background: #2a2a1a; border-left: 3px solid #ffa726; font-style: italic; }}
+.role {{ font-weight: bold; font-size: 0.85em; text-transform: uppercase; color: #888; }}
+.content {{ margin-top: 6px; line-height: 1.6; }}
+</style>
+</head>
+<body>
+<h1>{html_mod.escape(session.title)}</h1>
+<div class="meta">
+Agent: {html_mod.escape(session.agent_name)} | Model: {html_mod.escape(session.model)} | {session.message_count} messages | {created}
+</div>
+{''.join(messages_html)}
+</body>
+</html>"""
 
     def search(self, query: str, limit: int = 10) -> list[dict]:
         """Search across all sessions for messages matching a query.
