@@ -1,0 +1,131 @@
+"""Natural language interface for MCP management.
+
+Allows users to add/remove MCPs via plain English:
+  "add a web search tool"
+  "I need to query a PostgreSQL database"
+  "remove the GitHub integration"
+"""
+
+from __future__ import annotations
+
+import re
+from typing import Any, TYPE_CHECKING
+
+from forge.mcp.registry import MCP_REGISTRY, MCPEntry, search_registry, suggest_mcps
+from forge.utils.logging import get_logger
+
+if TYPE_CHECKING:
+    from forge.mcp.manager import MCPManager
+
+log = get_logger("mcp.natural_language")
+
+
+def parse_mcp_request(text: str) -> dict[str, Any]:
+    """Parse a natural language MCP request.
+
+    Returns dict with:
+      action: "add", "remove", "list", "search", "suggest", or None
+      mcp_name: matched MCP name or None
+      query: original text for fuzzy matching
+    """
+    text_lower = text.lower().strip()
+
+    # Detect action
+    action = None
+    if any(w in text_lower for w in ["add", "install", "enable", "set up", "i need", "i want"]):
+        action = "add"
+    elif any(w in text_lower for w in ["remove", "disable", "uninstall", "turn off"]):
+        action = "remove"
+    elif any(w in text_lower for w in ["list", "show", "what mcp", "which mcp"]):
+        action = "list"
+    elif any(w in text_lower for w in ["search", "find", "look for"]):
+        action = "search"
+    elif any(w in text_lower for w in ["suggest", "recommend", "what should"]):
+        action = "suggest"
+
+    # Try to match an MCP name
+    matched_name = None
+    for name, entry in MCP_REGISTRY.items():
+        if name in text_lower or entry.name in text_lower:
+            matched_name = name
+            break
+
+    # Fuzzy keyword matching if no exact name match
+    if not matched_name and action in ("add", "remove"):
+        keyword_map = {
+            "web-search": ["web search", "search the web", "duckduckgo", "internet search"],
+            "github": ["github", "git hub", "repository", "pull request"],
+            "sqlite": ["sqlite", "database", "sql"],
+            "postgres": ["postgres", "postgresql"],
+            "puppeteer": ["browser", "screenshot", "web scraping"],
+            "brave-search": ["brave search", "brave"],
+            "slack": ["slack", "messaging"],
+            "memory": ["memory", "remember", "knowledge graph"],
+            "fetch": ["fetch url", "download page", "web page"],
+        }
+        for mcp_name, keywords in keyword_map.items():
+            if any(kw in text_lower for kw in keywords):
+                matched_name = mcp_name
+                break
+
+    return {
+        "action": action,
+        "mcp_name": matched_name,
+        "query": text,
+    }
+
+
+def handle_mcp_request(manager: MCPManager, text: str) -> str:
+    """Handle a natural language MCP request and return a response.
+
+    This is the main entry point for NL-based MCP management.
+    """
+    parsed = parse_mcp_request(text)
+    action = parsed["action"]
+    name = parsed["mcp_name"]
+
+    if action == "add":
+        if name:
+            return manager.enable(name)
+        # Try to suggest based on context
+        suggestions = suggest_mcps(text)
+        if suggestions:
+            names = ", ".join(s.name for s in suggestions)
+            return f"Based on your request, you might want: {names}. Use 'forge mcp add <name>' to enable."
+        return "I couldn't determine which MCP you want. Try 'forge mcp search <keyword>' to find one."
+
+    elif action == "remove":
+        if name:
+            return manager.disable(name)
+        return "Please specify which MCP to remove. Use 'forge mcp list' to see enabled MCPs."
+
+    elif action == "list":
+        available = manager.list_available()
+        lines = ["Available MCP servers:\n"]
+        for mcp in available:
+            status_icon = {"enabled": "[on]", "disabled": "[off]", "built-in": "[built-in]"}.get(mcp["status"], "[ ]")
+            lines.append(f"  {status_icon} {mcp['name']:20s} {mcp['description']}")
+        return "\n".join(lines)
+
+    elif action == "search":
+        query = text.lower()
+        for word in ["search", "find", "look for", "mcp"]:
+            query = query.replace(word, "").strip()
+        results = search_registry(query)
+        if results:
+            lines = [f"MCPs matching '{query}':\n"]
+            for r in results:
+                lines.append(f"  {r.name:20s} {r.description}")
+            return "\n".join(lines)
+        return f"No MCPs found matching '{query}'"
+
+    elif action == "suggest":
+        suggestions = suggest_mcps(text)
+        if suggestions:
+            lines = ["Suggested MCPs:\n"]
+            for s in suggestions:
+                lines.append(f"  {s.name:20s} {s.description}")
+            return "\n".join(lines)
+        return "No specific suggestions for your current context. Try 'forge mcp list' to see all options."
+
+    return ""  # Not an MCP request

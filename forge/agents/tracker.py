@@ -1,0 +1,122 @@
+"""Agent tracker: manage and monitor single-agent and multi-agent systems.
+
+Tracks agent configurations, conversation histories, and performance metrics.
+Users can create, list, switch between, and monitor their agent systems.
+"""
+
+from __future__ import annotations
+
+import json
+import time
+from dataclasses import dataclass, field, asdict
+from pathlib import Path
+from typing import Any
+
+from forge.utils.logging import get_logger
+
+log = get_logger("agents.tracker")
+
+
+@dataclass
+class AgentSystemInfo:
+    """Metadata for a tracked agent system."""
+
+    name: str
+    system_type: str  # "single" or "multi"
+    agents: list[str]  # agent names in this system
+    description: str = ""
+    created_at: float = field(default_factory=time.time)
+    last_active: float = field(default_factory=time.time)
+    total_messages: int = 0
+    total_tool_calls: int = 0
+
+
+class AgentTracker:
+    """Tracks and manages agent systems (single-agent and multi-agent).
+
+    Provides:
+    - Create/delete tracked systems
+    - List all systems with status
+    - Monitor performance metrics
+    - Persist system configurations
+    """
+
+    def __init__(self, state_dir: str = ".forge_state"):
+        self.state_dir = Path(state_dir)
+        self.state_dir.mkdir(parents=True, exist_ok=True)
+        self.tracker_file = self.state_dir / "agent_systems.json"
+        self.systems: dict[str, AgentSystemInfo] = self._load()
+
+    def create_system(
+        self,
+        name: str,
+        system_type: str,
+        agents: list[str],
+        description: str = "",
+    ) -> str:
+        """Register a new agent system."""
+        if name in self.systems:
+            return f"System '{name}' already exists"
+
+        self.systems[name] = AgentSystemInfo(
+            name=name,
+            system_type=system_type,
+            agents=agents,
+            description=description,
+        )
+        self._save()
+        return f"Created {system_type}-agent system: {name} ({', '.join(agents)})"
+
+    def delete_system(self, name: str) -> str:
+        """Remove a tracked system."""
+        if name not in self.systems:
+            return f"System '{name}' not found"
+        del self.systems[name]
+        self._save()
+        return f"Deleted system: {name}"
+
+    def record_activity(self, system_name: str, messages: int = 0, tool_calls: int = 0) -> None:
+        """Record activity for a system."""
+        system = self.systems.get(system_name)
+        if system:
+            system.last_active = time.time()
+            system.total_messages += messages
+            system.total_tool_calls += tool_calls
+            self._save()
+
+    def list_systems(self) -> str:
+        """List all tracked agent systems."""
+        if not self.systems:
+            return "No agent systems tracked yet. Create one with 'forge agent create'."
+
+        lines = ["Agent Systems:\n"]
+        for sys in sorted(self.systems.values(), key=lambda s: s.last_active, reverse=True):
+            type_icon = "[single]" if sys.system_type == "single" else "[multi] "
+            agents_str = ", ".join(sys.agents)
+            lines.append(f"  {type_icon} {sys.name:25s} agents: {agents_str}")
+            if sys.description:
+                lines.append(f"           {sys.description}")
+            lines.append(f"           msgs: {sys.total_messages}  tools: {sys.total_tool_calls}")
+            lines.append("")
+
+        return "\n".join(lines)
+
+    def get_system(self, name: str) -> AgentSystemInfo | None:
+        """Get info for a specific system."""
+        return self.systems.get(name)
+
+    def _load(self) -> dict[str, AgentSystemInfo]:
+        if not self.tracker_file.exists():
+            return {}
+        try:
+            data = json.loads(self.tracker_file.read_text())
+            systems = {}
+            for name, info in data.items():
+                systems[name] = AgentSystemInfo(**info)
+            return systems
+        except (json.JSONDecodeError, TypeError, OSError):
+            return {}
+
+    def _save(self) -> None:
+        data = {name: asdict(sys) for name, sys in self.systems.items()}
+        self.tracker_file.write_text(json.dumps(data, indent=2))
