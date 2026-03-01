@@ -936,6 +936,218 @@ def undo(directory: str):
         console.print("Cancelled.")
 
 
+# ─── Doctor ─────────────────────────────────────────────────────────────────
+
+
+@main.command()
+def doctor():
+    """Diagnose your ollama-forge setup and suggest fixes.
+
+    \b
+    Checks: Ollama connectivity, GPU detection, model availability,
+    Python deps, disk space, and configuration.
+    """
+    import shutil
+    from forge.hardware import detect_hardware, select_profile
+    from forge.llm.client import OllamaClient
+
+    checks_passed = 0
+    checks_total = 0
+
+    def check(name: str, passed: bool, detail: str = "", fix: str = ""):
+        nonlocal checks_passed, checks_total
+        checks_total += 1
+        if passed:
+            checks_passed += 1
+            console.print(f"  [green]✓[/green] {name}: {detail or 'OK'}")
+        else:
+            console.print(f"  [red]✗[/red] {name}: {detail}")
+            if fix:
+                console.print(f"    [dim]Fix: {fix}[/dim]")
+
+    console.print("[bold]ollama-forge doctor[/bold]\n")
+
+    # 1. Python version
+    import sys
+    py_version = f"{sys.version_info.major}.{sys.version_info.minor}.{sys.version_info.micro}"
+    check("Python", sys.version_info >= (3, 10), py_version,
+          "Requires Python 3.10+. Install from python.org")
+
+    # 2. Hardware detection
+    try:
+        hw = detect_hardware()
+        profile = select_profile(hw)
+        check("Hardware", True, f"{profile.name} profile — {hw.gpu.name}, {hw.ram_gb:.0f} GB RAM")
+    except Exception as e:
+        check("Hardware", False, str(e))
+        hw = None
+        profile = None
+
+    # 3. Ollama connectivity
+    client = OllamaClient()
+    ollama_ok = client.is_available()
+    check("Ollama", ollama_ok, "Connected" if ollama_ok else "Not running",
+          "Start Ollama: ollama serve")
+
+    # 4. Models installed
+    if ollama_ok:
+        models = client.list_models()
+        if models:
+            names = [m.get("name", "") for m in models[:5]]
+            check("Models", True, f"{len(models)} installed ({', '.join(names)})")
+        else:
+            rec = profile.recommended_model if profile else "qwen2.5-coder:7b"
+            check("Models", False, "No models installed",
+                  f"Pull one: forge models pull {rec}")
+    else:
+        check("Models", False, "Cannot check (Ollama not running)")
+
+    # 5. Disk space
+    total, used, free = shutil.disk_usage("/")
+    free_gb = free / (1024 ** 3)
+    check("Disk space", free_gb > 5, f"{free_gb:.1f} GB free",
+          "Need at least 5 GB for model storage")
+
+    # 6. Dependencies
+    missing_deps = []
+    for dep in ["requests", "yaml", "click", "rich"]:
+        try:
+            __import__(dep)
+        except ImportError:
+            missing_deps.append(dep)
+    check("Dependencies", not missing_deps,
+          "All core deps installed" if not missing_deps else f"Missing: {', '.join(missing_deps)}",
+          "pip install -e .")
+
+    # 7. Optional deps
+    optional_status = []
+    for name, pkg in [("TUI", "textual"), ("Web UI", "fastapi"), ("Search", "duckduckgo_search")]:
+        try:
+            __import__(pkg)
+            optional_status.append(f"{name} ✓")
+        except ImportError:
+            optional_status.append(f"{name} ✗")
+    console.print(f"  [dim]Optional: {', '.join(optional_status)}[/dim]")
+
+    # Summary
+    console.print(f"\n[bold]{checks_passed}/{checks_total} checks passed[/bold]")
+    if checks_passed == checks_total:
+        console.print("[green]Everything looks good![/green]")
+    else:
+        console.print("[yellow]Some issues found. Fix them above and run 'forge doctor' again.[/yellow]")
+
+
+# ─── Init ──────────────────────────────────────────────────────────────────
+
+
+@main.command("init")
+@click.option("--dir", "-d", "directory", default=".", help="Project directory")
+def init_project(directory: str):
+    """Initialize a project for use with ollama-forge.
+
+    \b
+    Creates:
+    - .forge-rules (project rules for the agent)
+    - agents/ directory with a starter agent template
+    - .gitignore entries for forge state files
+    """
+    from pathlib import Path
+
+    project_dir = Path(directory).resolve()
+    created = []
+
+    # 1. Create .forge-rules if not exists
+    rules_file = project_dir / ".forge-rules"
+    if not rules_file.exists():
+        rules_file.write_text(
+            "# Project Rules for ollama-forge agents\n"
+            "# These rules are automatically loaded into the agent's system prompt.\n\n"
+            "# Example rules:\n"
+            "# - Always write tests for new functions\n"
+            "# - Use type hints in all Python code\n"
+            "# - Follow the existing code style\n"
+            "# - Never modify files in the vendor/ directory\n"
+        )
+        created.append(".forge-rules")
+
+    # 2. Create agents/ directory with starter template
+    agents_dir = project_dir / "agents"
+    agents_dir.mkdir(exist_ok=True)
+    starter = agents_dir / "my-agent.yaml"
+    if not starter.exists():
+        starter.write_text(
+            "# Custom agent definition\n"
+            "# Edit this file and run: forge agent run my-agent\n\n"
+            "name: my-agent\n"
+            "description: \"Project-specific assistant\"\n"
+            "model: \"\"  # auto-detected from hardware\n"
+            "system_prompt: |\n"
+            "  You are a helpful assistant for this project.\n"
+            "  Follow the project rules in .forge-rules.\n"
+            "  Be concise and practical.\n"
+            "tools:\n"
+            "  - filesystem\n"
+            "  - shell\n"
+            "  - git\n"
+            "  - web\n"
+            "temperature: 0.5\n"
+        )
+        created.append("agents/my-agent.yaml")
+
+    # 3. Add .forge_state to .gitignore
+    gitignore = project_dir / ".gitignore"
+    forge_entries = [".forge_state/", ".forge/"]
+    if gitignore.exists():
+        content = gitignore.read_text()
+        new_entries = [e for e in forge_entries if e not in content]
+        if new_entries:
+            with open(gitignore, "a") as f:
+                f.write("\n# ollama-forge\n")
+                for entry in new_entries:
+                    f.write(f"{entry}\n")
+            created.append(".gitignore (updated)")
+    else:
+        gitignore.write_text(
+            "# ollama-forge\n"
+            ".forge_state/\n"
+            ".forge/\n"
+        )
+        created.append(".gitignore")
+
+    if created:
+        console.print("[green]Project initialized for ollama-forge:[/green]")
+        for f in created:
+            console.print(f"  + {f}")
+        console.print("\nNext steps:")
+        console.print("  1. Edit [cyan].forge-rules[/cyan] with your project conventions")
+        console.print("  2. Run [cyan]forge chat[/cyan] to start chatting")
+        console.print("  3. Run [cyan]forge index[/cyan] to index your codebase")
+    else:
+        console.print("[dim]Project already initialized — all files exist.[/dim]")
+
+
+# ─── Prompts ───────────────────────────────────────────────────────────────
+
+
+@main.command("prompts")
+def list_prompts():
+    """List available system prompt templates."""
+    from forge.agents.prompts import list_templates
+
+    templates = list_templates()
+
+    table = Table(title="System Prompt Templates")
+    table.add_column("Name", style="cyan")
+    table.add_column("Category", style="dim")
+    table.add_column("Description")
+    table.add_column("Variables", style="dim")
+
+    for t in templates:
+        table.add_row(t["name"], t["category"], t["description"], t["variables"])
+    console.print(table)
+    console.print("\nUse a template: [bold]forge chat --agent coder[/bold]")
+
+
 # ─── Sessions ──────────────────────────────────────────────────────────────
 
 
