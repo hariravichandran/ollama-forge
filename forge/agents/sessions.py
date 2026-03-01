@@ -253,6 +253,45 @@ class SessionManager:
 
         return "\n".join(lines)
 
+    def search(self, query: str, limit: int = 10) -> list[dict]:
+        """Search across all sessions for messages matching a query.
+
+        Args:
+            query: Text to search for (case-insensitive).
+            limit: Maximum results to return.
+
+        Returns:
+            List of dicts with session_id, title, role, content, match_line.
+        """
+        query_lower = query.lower()
+        results = []
+
+        for session_file in self.sessions_dir.glob("session-*.json"):
+            try:
+                data = json.loads(session_file.read_text())
+                session_id = data.get("session_id", "")
+                title = data.get("title", "Untitled")
+
+                for msg in data.get("messages", []):
+                    content = msg.get("content", "")
+                    if query_lower in content.lower():
+                        # Extract matching line
+                        for line in content.splitlines():
+                            if query_lower in line.lower():
+                                results.append({
+                                    "session_id": session_id,
+                                    "title": title,
+                                    "role": msg.get("role", ""),
+                                    "content": line.strip()[:200],
+                                })
+                                if len(results) >= limit:
+                                    return results
+                                break
+            except Exception:
+                continue
+
+        return results
+
     def _generate_title(self, messages: list[dict[str, str]]) -> str:
         """Generate a title from the first user message."""
         for msg in messages:

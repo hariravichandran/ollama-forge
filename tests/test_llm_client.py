@@ -51,6 +51,31 @@ class TestOllamaClient:
         result = client.chat([{"role": "user", "content": "test"}], timeout=2)
         assert "error" in result
 
+    def test_max_retries_default(self):
+        """Default max_retries should be 2."""
+        client = OllamaClient()
+        assert client.max_retries == 2
+
+    def test_max_retries_custom(self):
+        """Should accept custom max_retries."""
+        client = OllamaClient(max_retries=5)
+        assert client.max_retries == 5
+
+    def test_generate_retries_on_failure(self):
+        """Generate should retry on connection failure up to max_retries."""
+        client = OllamaClient(base_url="http://localhost:19999", max_retries=1)
+        result = client.generate("test", timeout=2)
+        assert "error" in result
+        # Should have counted errors from retries
+        assert client.stats.errors >= 1
+
+    def test_generate_zero_retries(self):
+        """With max_retries=0, should fail immediately."""
+        client = OllamaClient(base_url="http://localhost:19999", max_retries=0)
+        result = client.generate("test", timeout=2)
+        assert "error" in result
+        assert client.stats.errors == 1
+
     @pytest.mark.skipif(
         not OllamaClient().is_available(),
         reason="Ollama not running",

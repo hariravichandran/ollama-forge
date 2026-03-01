@@ -159,3 +159,57 @@ class TestSessionCommands:
             sessions = mgr.list_sessions()
             assert len(sessions) == 1
             assert sessions[0].session_id == sid
+
+    def test_session_search_finds_match(self):
+        """Search should find messages containing the query."""
+        from forge.agents.sessions import SessionManager
+        with tempfile.TemporaryDirectory() as tmpdir:
+            mgr = SessionManager(sessions_dir=Path(tmpdir))
+            mgr.save(
+                messages=[
+                    {"role": "user", "content": "How do I fix a segfault?"},
+                    {"role": "assistant", "content": "A segfault usually means..."},
+                ],
+                agent_name="coder",
+                model="test:7b",
+            )
+            results = mgr.search("segfault")
+            assert len(results) >= 1
+            assert "segfault" in results[0]["content"].lower()
+
+    def test_session_search_case_insensitive(self):
+        """Search should be case-insensitive."""
+        from forge.agents.sessions import SessionManager
+        with tempfile.TemporaryDirectory() as tmpdir:
+            mgr = SessionManager(sessions_dir=Path(tmpdir))
+            mgr.save(
+                messages=[{"role": "user", "content": "Hello World"}],
+                agent_name="assistant",
+            )
+            results = mgr.search("hello world")
+            assert len(results) == 1
+
+    def test_session_search_no_match(self):
+        """Search should return empty list when no match."""
+        from forge.agents.sessions import SessionManager
+        with tempfile.TemporaryDirectory() as tmpdir:
+            mgr = SessionManager(sessions_dir=Path(tmpdir))
+            mgr.save(
+                messages=[{"role": "user", "content": "Python rocks"}],
+                agent_name="assistant",
+            )
+            results = mgr.search("javascript")
+            assert results == []
+
+    def test_session_search_respects_limit(self):
+        """Search should respect the limit parameter."""
+        from forge.agents.sessions import SessionManager
+        with tempfile.TemporaryDirectory() as tmpdir:
+            mgr = SessionManager(sessions_dir=Path(tmpdir))
+            for i in range(5):
+                mgr.save(
+                    messages=[{"role": "user", "content": f"Query about Python #{i}"}],
+                    agent_name="assistant",
+                )
+            results = mgr.search("Python", limit=2)
+            assert len(results) == 2

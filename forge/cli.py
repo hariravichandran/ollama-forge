@@ -1222,6 +1222,34 @@ def session_delete(session_id: str):
         console.print(f"[red]Session not found: {session_id}[/red]")
 
 
+@session.command("search")
+@click.argument("query")
+@click.option("--limit", "-n", default=10, help="Maximum results")
+def session_search(query: str, limit: int):
+    """Search across all saved sessions for a query string."""
+    from forge.agents.sessions import SessionManager
+
+    mgr = SessionManager()
+    results = mgr.search(query, limit=limit)
+
+    if not results:
+        console.print(f"No matches found for '{query}'")
+        return
+
+    table = Table(title=f"Search: {query}")
+    table.add_column("Session", style="cyan", width=12)
+    table.add_column("Role", style="dim", width=10)
+    table.add_column("Match")
+
+    for r in results:
+        table.add_row(
+            r["session_id"][:12],
+            r["role"],
+            r["content"][:100],
+        )
+    console.print(table)
+
+
 # ─── Compare ──────────────────────────────────────────────────────────────
 
 

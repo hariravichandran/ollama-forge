@@ -55,6 +55,7 @@ class OllamaClient:
         num_thread: int | None = None,
         num_batch: int = 2048,
         keep_alive: str = "30m",
+        max_retries: int = 2,
     ):
         self.model = model
         self.base_url = base_url.rstrip("/")
@@ -63,6 +64,7 @@ class OllamaClient:
         self.num_thread = num_thread
         self.num_batch = num_batch
         self.keep_alive = keep_alive  # Keep model in memory between requests
+        self.max_retries = max_retries
         self.stats = LLMStats()
 
     def is_available(self) -> bool:
@@ -104,7 +106,16 @@ class OllamaClient:
         return []
 
     def pull_model(self, model: str, progress_cb: Callable[[str], None] | None = None) -> bool:
-        """Pull a model from the Ollama registry."""
+        """Pull a model from the Ollama registry.
+
+        Args:
+            model: Model name (e.g., 'qwen2.5-coder:7b').
+            progress_cb: Called with progress string for each update.
+                The string includes download percentage when available.
+
+        Returns:
+            True if pull succeeded.
+        """
         log.info("Pulling model: %s", model)
         try:
             r = requests.post(
@@ -117,8 +128,20 @@ class OllamaClient:
                 if line:
                     data = json.loads(line)
                     status = data.get("status", "")
+
+                    # Format progress with percentage if available
+                    total = data.get("total", 0)
+                    completed = data.get("completed", 0)
+                    if total and completed:
+                        pct = int(completed / total * 100)
+                        size_gb = total / (1024 ** 3)
+                        progress_str = f"{status} — {pct}% of {size_gb:.1f} GB"
+                    else:
+                        progress_str = status
+
                     if progress_cb:
-                        progress_cb(status)
+                        progress_cb(progress_str)
+
                     if "error" in data:
                         log.error("Pull error: %s", data["error"])
                         return False
@@ -186,37 +209,55 @@ class OllamaClient:
         elif json_mode:
             payload["format"] = "json"
 
-        start = time.time()
-        try:
-            r = requests.post(
-                f"{self.base_url}/api/generate",
-                json=payload,
-                timeout=timeout,
-            )
-            elapsed = time.time() - start
+        last_error = ""
+        for attempt in range(1 + self.max_retries):
+            start = time.time()
+            try:
+                r = requests.post(
+                    f"{self.base_url}/api/generate",
+                    json=payload,
+                    timeout=timeout,
+                )
+                elapsed = time.time() - start
 
-            if r.status_code != 200:
+                if r.status_code != 200:
+                    self.stats.errors += 1
+                    last_error = r.text
+                    if attempt < self.max_retries:
+                        log.warning("Generate failed (attempt %d), retrying: %s", attempt + 1, r.text[:100])
+                        time.sleep(1)
+                        continue
+                    return {"response": "", "tokens": 0, "time_s": elapsed, "tokens_per_sec": 0, "error": r.text}
+
+                data = r.json()
+                tokens = data.get("eval_count", 0)
+                self.stats.total_calls += 1
+                self.stats.total_tokens += tokens
+                self.stats.total_time_s += elapsed
+
+                return {
+                    "response": data.get("response", ""),
+                    "tokens": tokens,
+                    "time_s": elapsed,
+                    "tokens_per_sec": tokens / max(0.01, elapsed),
+                }
+            except requests.Timeout:
                 self.stats.errors += 1
-                return {"response": "", "tokens": 0, "time_s": elapsed, "tokens_per_sec": 0, "error": r.text}
+                last_error = "timeout"
+                if attempt < self.max_retries:
+                    log.warning("Generate timed out (attempt %d), retrying", attempt + 1)
+                    continue
+                return {"response": "", "tokens": 0, "time_s": time.time() - start, "tokens_per_sec": 0, "error": "timeout"}
+            except (requests.ConnectionError, requests.exceptions.RequestException, OSError) as e:
+                self.stats.errors += 1
+                last_error = str(e)
+                if attempt < self.max_retries:
+                    log.warning("Generate error (attempt %d), retrying: %s", attempt + 1, e)
+                    time.sleep(1)
+                    continue
+                return {"response": "", "tokens": 0, "time_s": 0, "tokens_per_sec": 0, "error": str(e)}
 
-            data = r.json()
-            tokens = data.get("eval_count", 0)
-            self.stats.total_calls += 1
-            self.stats.total_tokens += tokens
-            self.stats.total_time_s += elapsed
-
-            return {
-                "response": data.get("response", ""),
-                "tokens": tokens,
-                "time_s": elapsed,
-                "tokens_per_sec": tokens / max(0.01, elapsed),
-            }
-        except requests.Timeout:
-            self.stats.errors += 1
-            return {"response": "", "tokens": 0, "time_s": time.time() - start, "tokens_per_sec": 0, "error": "timeout"}
-        except (requests.ConnectionError, requests.exceptions.RequestException, OSError) as e:
-            self.stats.errors += 1
-            return {"response": "", "tokens": 0, "time_s": 0, "tokens_per_sec": 0, "error": str(e)}
+        return {"response": "", "tokens": 0, "time_s": 0, "tokens_per_sec": 0, "error": last_error}
 
     def chat(
         self,
