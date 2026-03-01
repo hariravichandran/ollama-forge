@@ -188,6 +188,58 @@ def _handle_idea_command(user_input: str, working_dir: str):
         console.print("Usage: /idea [list|submit <description>]")
 
 
+# ─── UI (Web) ────────────────────────────────────────────────────────────────
+
+
+@main.command()
+@click.option("--port", "-p", default=8080, help="Port to listen on")
+@click.option("--host", default="127.0.0.1", help="Host to bind to")
+@click.option("--model", "-m", default="", help="Model to use")
+@click.option("--agent", "-a", default="assistant", help="Agent to use")
+@click.option("--working-dir", "-d", default=".", help="Working directory")
+def ui(port: int, host: str, model: str, agent: str, working_dir: str):
+    """Launch the Web UI in your browser.
+
+    \b
+    Requires: pip install ollama-forge[web]
+    """
+    from forge.ui.web.app import launch_web_ui
+
+    launch_web_ui(
+        port=port,
+        host=host,
+        model=model,
+        agent=agent,
+        working_dir=working_dir,
+    )
+
+
+# ─── TUI ─────────────────────────────────────────────────────────────────────
+
+
+@main.command()
+@click.option("--model", "-m", default="", help="Model to use (auto-detected if empty)")
+@click.option("--agent", "-a", default="assistant", help="Agent to use")
+@click.option("--working-dir", "-d", default=".", help="Working directory")
+@click.option("--cascade", is_flag=True, help="Enable cascading model escalation")
+@click.option("--auto-approve", is_flag=True, help="Auto-approve all tool actions")
+def tui(model: str, agent: str, working_dir: str, cascade: bool, auto_approve: bool):
+    """Launch the Terminal UI (rich Textual interface).
+
+    \b
+    Requires: pip install ollama-forge[tui]
+    """
+    from forge.ui.terminal import launch_tui
+
+    launch_tui(
+        model=model,
+        agent=agent,
+        working_dir=working_dir,
+        cascade=cascade,
+        auto_approve=auto_approve,
+    )
+
+
 # ─── Hardware ────────────────────────────────────────────────────────────────
 
 

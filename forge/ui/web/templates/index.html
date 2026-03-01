@@ -1,0 +1,271 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="dark">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>ollama-forge</title>
+    <link rel="stylesheet" href="/static/style.css">
+    <script src="https://unpkg.com/htmx.org@2.0.4"></script>
+</head>
+<body>
+    <div id="app">
+        <!-- Header -->
+        <header id="header">
+            <div class="header-left">
+                <h1>ollama-forge</h1>
+            </div>
+            <div class="header-right">
+                <select id="model-select" onchange="switchModel(this.value)">
+                    <option value="">Loading models...</option>
+                </select>
+                <select id="agent-select" onchange="switchAgent(this.value)">
+                    <option value="assistant">assistant</option>
+                    <option value="coder">coder</option>
+                    <option value="researcher">researcher</option>
+                </select>
+                <button onclick="resetChat()" title="Reset chat">Reset</button>
+            </div>
+        </header>
+
+        <!-- Main content -->
+        <div id="main">
+            <!-- Sidebar -->
+            <aside id="sidebar">
+                <div class="sidebar-section">
+                    <h3>Status</h3>
+                    <div id="status-panel">
+                        <div class="status-item">
+                            <span class="label">Model</span>
+                            <span id="status-model" class="value">...</span>
+                        </div>
+                        <div class="status-item">
+                            <span class="label">Agent</span>
+                            <span id="status-agent" class="value">...</span>
+                        </div>
+                        <div class="status-item">
+                            <span class="label">Profile</span>
+                            <span id="status-profile" class="value">...</span>
+                        </div>
+                        <div class="status-item">
+                            <span class="label">GPU</span>
+                            <span id="status-gpu" class="value">...</span>
+                        </div>
+                        <div class="status-item">
+                            <span class="label">RAM</span>
+                            <span id="status-ram" class="value">...</span>
+                        </div>
+                        <div class="status-item">
+                            <span class="label">Ollama</span>
+                            <span id="status-ollama" class="value">...</span>
+                        </div>
+                    </div>
+                </div>
+                <div class="sidebar-section">
+                    <h3>Help</h3>
+                    <p class="help-text">Type a message to chat with the AI agent. Use the dropdowns to switch models or agents.</p>
+                </div>
+            </aside>
+
+            <!-- Chat area -->
+            <div id="chat-container">
+                <div id="chat-messages">
+                    <div class="message system">
+                        <div class="message-content">
+                            Welcome to <strong>ollama-forge</strong>. Type a message below to start chatting.
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Input area -->
+                <div id="input-area">
+                    <form id="chat-form" onsubmit="sendMessage(event)">
+                        <input type="text" id="chat-input"
+                               placeholder="Type a message..."
+                               autocomplete="off"
+                               autofocus>
+                        <button type="submit" id="send-btn">Send</button>
+                    </form>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        // ─── State ──────────────────────────────────────────────
+        let isLoading = false;
+
+        // ─── Init ───────────────────────────────────────────────
+        document.addEventListener('DOMContentLoaded', () => {
+            loadStatus();
+        });
+
+        async function loadStatus() {
+            try {
+                const res = await fetch('/api/status');
+                const data = await res.json();
+
+                document.getElementById('status-model').textContent = data.model || '?';
+                document.getElementById('status-agent').textContent = data.agent || '?';
+                document.getElementById('status-profile').textContent = data.profile || '?';
+                document.getElementById('status-gpu').textContent = data.gpu || '?';
+                document.getElementById('status-ram').textContent = data.ram_gb ? data.ram_gb + ' GB' : '?';
+                document.getElementById('status-ollama').textContent = data.ollama_available ? 'Connected' : 'Disconnected';
+                document.getElementById('status-ollama').className = 'value ' + (data.ollama_available ? 'ok' : 'error');
+
+                // Populate model dropdown
+                const modelSelect = document.getElementById('model-select');
+                modelSelect.innerHTML = '';
+                for (const m of data.available_models || []) {
+                    const opt = document.createElement('option');
+                    opt.value = m;
+                    opt.textContent = m;
+                    if (m === data.model) opt.selected = true;
+                    modelSelect.appendChild(opt);
+                }
+
+                // Set agent dropdown
+                document.getElementById('agent-select').value = data.agent || 'assistant';
+            } catch (e) {
+                console.error('Failed to load status:', e);
+            }
+        }
+
+        // ─── Chat ───────────────────────────────────────────────
+        async function sendMessage(event) {
+            event.preventDefault();
+
+            const input = document.getElementById('chat-input');
+            const message = input.value.trim();
+            if (!message || isLoading) return;
+
+            input.value = '';
+            isLoading = true;
+            updateSendButton();
+
+            // Add user message
+            addMessage('user', message);
+
+            // Add loading indicator
+            const loadingId = 'loading-' + Date.now();
+            addMessage('assistant', '<span class="thinking">Thinking...</span>', loadingId);
+
+            try {
+                const res = await fetch('/api/chat', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ message }),
+                });
+
+                const data = await res.json();
+
+                // Remove loading indicator
+                const loadingEl = document.getElementById(loadingId);
+                if (loadingEl) loadingEl.remove();
+
+                if (data.error) {
+                    addMessage('system', 'Error: ' + data.error);
+                } else {
+                    addMessage('assistant', formatMarkdown(data.response));
+                }
+            } catch (e) {
+                const loadingEl = document.getElementById(loadingId);
+                if (loadingEl) loadingEl.remove();
+                addMessage('system', 'Connection error: ' + e.message);
+            }
+
+            isLoading = false;
+            updateSendButton();
+            input.focus();
+        }
+
+        function addMessage(role, content, id) {
+            const container = document.getElementById('chat-messages');
+            const div = document.createElement('div');
+            div.className = 'message ' + role;
+            if (id) div.id = id;
+
+            const label = role === 'user' ? 'You' : role === 'assistant' ? 'Agent' : 'System';
+            div.innerHTML = `
+                <div class="message-header">${label}</div>
+                <div class="message-content">${content}</div>
+            `;
+
+            container.appendChild(div);
+            container.scrollTop = container.scrollHeight;
+        }
+
+        function updateSendButton() {
+            const btn = document.getElementById('send-btn');
+            btn.disabled = isLoading;
+            btn.textContent = isLoading ? '...' : 'Send';
+        }
+
+        // ─── Actions ────────────────────────────────────────────
+        async function switchModel(model) {
+            if (!model) return;
+            try {
+                await fetch('/api/model', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ model }),
+                });
+                document.getElementById('status-model').textContent = model;
+                addMessage('system', 'Switched to model: ' + model);
+            } catch (e) {
+                addMessage('system', 'Failed to switch model: ' + e.message);
+            }
+        }
+
+        async function switchAgent(agent) {
+            if (!agent) return;
+            try {
+                await fetch('/api/agent', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ agent }),
+                });
+                document.getElementById('status-agent').textContent = agent;
+                addMessage('system', 'Switched to agent: ' + agent);
+            } catch (e) {
+                addMessage('system', 'Failed to switch agent: ' + e.message);
+            }
+        }
+
+        async function resetChat() {
+            try {
+                await fetch('/api/reset', { method: 'POST' });
+                document.getElementById('chat-messages').innerHTML = `
+                    <div class="message system">
+                        <div class="message-content">Chat reset. Start a new conversation.</div>
+                    </div>
+                `;
+            } catch (e) {
+                console.error('Reset failed:', e);
+            }
+        }
+
+        // ─── Markdown formatting (basic) ────────────────────────
+        function formatMarkdown(text) {
+            if (!text) return '';
+            return text
+                .replace(/&/g, '&amp;')
+                .replace(/</g, '&lt;')
+                .replace(/>/g, '&gt;')
+                .replace(/```(\w*)\n([\s\S]*?)```/g, '<pre><code class="lang-$1">$2</code></pre>')
+                .replace(/`([^`]+)`/g, '<code>$1</code>')
+                .replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>')
+                .replace(/\*(.+?)\*/g, '<em>$1</em>')
+                .replace(/\n/g, '<br>');
+        }
+
+        // ─── Keyboard shortcuts ─────────────────────────────────
+        document.addEventListener('keydown', (e) => {
+            // Ctrl+L to focus input
+            if (e.ctrlKey && e.key === 'l') {
+                e.preventDefault();
+                document.getElementById('chat-input').focus();
+            }
+        });
+    </script>
+</body>
+</html>
