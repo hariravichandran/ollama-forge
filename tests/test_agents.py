@@ -14,7 +14,9 @@ from forge.agents.permissions import (
     PermissionManager, PermissionLevel, AutoApproveManager, DEFAULT_PERMISSIONS,
 )
 from forge.agents.qa import QAAgent, QAResult
+from forge.agents.reflect import ReflectiveAgent
 from forge.agents.rules import load_project_rules, create_rules_template
+from forge.agents.tasks import TaskManager, TaskStatus, TaskResult
 from forge.agents.tracker import AgentTracker
 from forge.community.ideas import IdeaCollector
 
@@ -592,3 +594,126 @@ class TestProjectRules:
             (Path(tmpdir) / ".forge-rules").write_text("existing")
             result = create_rules_template(tmpdir)
             assert "already exists" in result
+
+
+# ─── Reflective Agent Tests ──────────────────────────────────────────────────
+
+
+class TestReflectiveAgent:
+    """Tests for the self-reflecting agent."""
+
+    def test_init(self):
+        client = MockOllamaClient()
+        agent = ReflectiveAgent(client=client)
+        assert agent.max_revisions == 1
+        assert agent._review_count == 0
+
+    def test_short_response_not_reviewed(self):
+        client = MockOllamaClient(response="ok")
+        agent = ReflectiveAgent(client=client)
+        response = agent.chat("hi")
+        assert response == "ok"
+        assert agent._review_count == 0  # too short to review
+
+    def test_stats_include_reflection(self):
+        client = MockOllamaClient()
+        agent = ReflectiveAgent(client=client)
+        stats = agent.get_stats()
+        assert "reflection" in stats
+        assert stats["reflection"]["reviews"] == 0
+        assert stats["reflection"]["revisions"] == 0
+
+
+# ─── Background Task Tests ───────────────────────────────────────────────────
+
+
+class TestTaskResult:
+    """Tests for task result."""
+
+    def test_done_states(self):
+        r = TaskResult(task_id="t1", name="test", status=TaskStatus.COMPLETED)
+        assert r.done
+
+        r2 = TaskResult(task_id="t2", name="test", status=TaskStatus.RUNNING)
+        assert not r2.done
+
+    def test_elapsed(self):
+        r = TaskResult(
+            task_id="t1", name="test", status=TaskStatus.COMPLETED,
+            started_at=100.0, completed_at=105.0,
+        )
+        assert r.elapsed_s == 5.0
+
+
+class TestTaskManager:
+    """Tests for background task execution."""
+
+    def test_submit_and_complete(self):
+        import time
+        tm = TaskManager()
+        task_id = tm.submit("echo", "echo hello")
+
+        # Wait for completion
+        for _ in range(50):
+            status = tm.get_status(task_id)
+            if status and status.done:
+                break
+            time.sleep(0.1)
+
+        status = tm.get_status(task_id)
+        assert status is not None
+        assert status.status == TaskStatus.COMPLETED
+        assert "hello" in status.output
+
+    def test_submit_failing_command(self):
+        import time
+        tm = TaskManager()
+        task_id = tm.submit("fail", "exit 1")
+
+        for _ in range(50):
+            status = tm.get_status(task_id)
+            if status and status.done:
+                break
+            time.sleep(0.1)
+
+        status = tm.get_status(task_id)
+        assert status.status == TaskStatus.FAILED
+
+    def test_list_tasks(self):
+        import time
+        tm = TaskManager()
+        tm.submit("t1", "echo 1")
+        tm.submit("t2", "echo 2")
+
+        time.sleep(0.5)
+        tasks = tm.list_tasks()
+        assert len(tasks) == 2
+
+    def test_cancel_task(self):
+        import time
+        tm = TaskManager()
+        task_id = tm.submit("slow", "sleep 10")
+        time.sleep(0.2)
+        success = tm.cancel(task_id)
+        assert success
+        status = tm.get_status(task_id)
+        assert status.status == TaskStatus.CANCELLED
+
+    def test_cleanup(self):
+        import time
+        tm = TaskManager()
+        tm.submit("quick", "echo done")
+        time.sleep(0.5)
+        removed = tm.cleanup()
+        assert removed >= 1
+        assert len(tm.list_tasks()) == 0
+
+    def test_max_concurrent(self):
+        tm = TaskManager(max_concurrent=1)
+        tm.submit("t1", "sleep 5")
+        import time
+        time.sleep(0.1)
+        task_id2 = tm.submit("t2", "echo 2")
+        status = tm.get_status(task_id2)
+        assert status.status == TaskStatus.FAILED
+        assert "Too many" in status.error

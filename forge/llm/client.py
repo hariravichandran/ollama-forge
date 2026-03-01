@@ -132,11 +132,23 @@ class OllamaClient:
         prompt: str,
         system: str = "",
         json_mode: bool = False,
+        json_schema: dict | None = None,
         timeout: int = 300,
         temperature: float | None = None,
         model: str | None = None,
     ) -> dict[str, Any]:
         """Generate a completion (non-streaming).
+
+        Args:
+            prompt: The prompt text.
+            system: Optional system prompt.
+            json_mode: If True, forces JSON output.
+            json_schema: If provided, forces output to match the given
+                JSON schema (Ollama structured output). Takes precedence
+                over json_mode.
+            timeout: Request timeout in seconds.
+            temperature: Override temperature for this call.
+            model: Override model for this call.
 
         Returns dict with keys: response, tokens, time_s, tokens_per_sec
         """
@@ -154,7 +166,10 @@ class OllamaClient:
             payload["options"]["num_thread"] = self.num_thread
         if system:
             payload["system"] = system
-        if json_mode:
+        if json_schema:
+            # Ollama structured output: pass the full JSON schema as format
+            payload["format"] = json_schema
+        elif json_mode:
             payload["format"] = "json"
 
         start = time.time()
@@ -195,14 +210,21 @@ class OllamaClient:
         system: str = "",
         tools: list[dict] | None = None,
         json_mode: bool = False,
+        json_schema: dict | None = None,
         timeout: int = 300,
         temperature: float | None = None,
         model: str | None = None,
     ) -> dict[str, Any]:
         """Chat completion (non-streaming).
 
-        messages: list of {"role": "user"|"assistant"|"system", "content": "..."}
-        tools: Ollama tool definitions for function calling
+        Args:
+            messages: list of {"role": "user"|"assistant"|"system", "content": "..."}
+            tools: Ollama tool definitions for function calling
+            json_mode: If True, forces JSON output
+            json_schema: If provided, forces output to match the JSON schema
+            timeout: Request timeout in seconds
+            temperature: Override temperature for this call
+            model: Override model for this call
 
         Returns dict with: response, tokens, time_s, tool_calls (if any)
         """
@@ -220,7 +242,9 @@ class OllamaClient:
             payload["options"]["num_thread"] = self.num_thread
         if tools:
             payload["tools"] = tools
-        if json_mode:
+        if json_schema:
+            payload["format"] = json_schema
+        elif json_mode:
             payload["format"] = "json"
 
         start = time.time()
