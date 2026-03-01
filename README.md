@@ -27,6 +27,9 @@ ollama-forge turns your machine into a full AI development environment:
 - **QA agent** — Auto-generates and runs tests for code changes before they ship
 - **Self-improvement** — The framework improves itself using community ideas and latest AI research
 - **OpenAI-compatible API** — Drop-in REST API for Continue.dev and other OpenAI clients
+- **Terminal UI** — Rich Textual-based TUI with model picker, agent switching, keyboard shortcuts
+- **Web UI** — Browser-based chat with dark theme, streaming responses, hardware status panel
+- **Docker support** — `docker compose up` for instant setup with Ollama included
 
 Optimized for **AMD iGPU + ROCm** (our primary target), but works with NVIDIA GPUs, Apple Silicon, and CPU-only setups too.
 
@@ -52,7 +55,18 @@ cd ollama-forge
 bash install.sh
 ```
 
-### Option C: Manual Setup
+### Option C: Docker
+
+```bash
+git clone https://github.com/hariravichandran/ollama-forge.git
+cd ollama-forge
+docker compose up
+# Web UI at http://localhost:8080
+```
+
+Uncomment the GPU lines in `docker-compose.yml` for AMD ROCm or NVIDIA GPU acceleration.
+
+### Option D: Manual Setup
 
 ```bash
 git clone https://github.com/hariravichandran/ollama-forge.git

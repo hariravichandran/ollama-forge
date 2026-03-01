@@ -1,0 +1,62 @@
+# ollama-forge Docker Compose
+#
+# Usage:
+#   docker compose up          # Start forge + ollama
+#   docker compose up -d       # Start in background
+#   docker compose down        # Stop all
+#
+# Access:
+#   Web UI:  http://localhost:8080
+#   API:     http://localhost:8000/v1/chat/completions
+#   Ollama:  http://localhost:11434
+
+services:
+  ollama:
+    image: ollama/ollama:latest
+    container_name: ollama
+    ports:
+      - "11434:11434"
+    volumes:
+      - ollama_data:/root/.ollama
+    # Uncomment for AMD GPU (ROCm):
+    # devices:
+    #   - /dev/kfd
+    #   - /dev/dri
+    # Uncomment for NVIDIA GPU:
+    # deploy:
+    #   resources:
+    #     reservations:
+    #       devices:
+    #         - driver: nvidia
+    #           count: all
+    #           capabilities: [gpu]
+    restart: unless-stopped
+
+  forge:
+    build: .
+    container_name: ollama-forge
+    ports:
+      - "8080:8080"
+    environment:
+      - OLLAMA_BASE_URL=http://ollama:11434
+    depends_on:
+      - ollama
+    restart: unless-stopped
+
+  # Optional: API server for OpenAI-compatible clients
+  forge-api:
+    build: .
+    container_name: ollama-forge-api
+    command: ["api", "--host", "0.0.0.0", "--port", "8000"]
+    ports:
+      - "8000:8000"
+    environment:
+      - OLLAMA_BASE_URL=http://ollama:11434
+    depends_on:
+      - ollama
+    profiles:
+      - api
+    restart: unless-stopped
+
+volumes:
+  ollama_data:

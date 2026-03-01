@@ -1,6 +1,8 @@
 """Tests for built-in tools."""
 
+import json
 import tempfile
+import time
 from pathlib import Path
 
 import pytest
@@ -8,6 +10,8 @@ import pytest
 from forge.tools.filesystem import FilesystemTool
 from forge.tools.shell import ShellTool
 from forge.tools.git import GitTool
+from forge.tools.web import WebTool
+from forge.tools import BUILTIN_TOOLS
 
 
 class TestFilesystemTool:
@@ -114,3 +118,117 @@ class TestShellTool:
         result = tool.execute("run_command", {"command": "nonexistent_command_xyz"})
         # Should return error info, not crash
         assert isinstance(result, str)
+
+
+class TestWebTool:
+    """Tests for the web tool."""
+
+    def test_tool_definitions(self):
+        """Web tool should define search and fetch."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tool = WebTool(working_dir=tmpdir)
+            defs = tool.get_tool_definitions()
+            assert len(defs) == 2
+            names = [d["function"]["name"] for d in defs]
+            assert "web_search" in names
+            assert "web_fetch" in names
+
+    def test_empty_search_returns_error(self):
+        """Empty search query should return error."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tool = WebTool(working_dir=tmpdir)
+            result = tool.execute("web_search", {"query": ""})
+            assert "error" in result.lower() or "empty" in result.lower()
+
+    def test_empty_fetch_returns_error(self):
+        """Empty URL should return error."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tool = WebTool(working_dir=tmpdir)
+            result = tool.execute("web_fetch", {"url": ""})
+            assert "error" in result.lower() or "empty" in result.lower()
+
+    def test_unknown_function(self):
+        """Unknown function name should return error."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tool = WebTool(working_dir=tmpdir)
+            result = tool.execute("nonexistent", {})
+            assert "Unknown" in result
+
+    def test_cache_ttl(self):
+        """Cache TTL should be 6 hours."""
+        assert WebTool.CACHE_TTL == 6 * 3600
+
+    def test_cache_set_and_get(self):
+        """Cache should store and retrieve values."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tool = WebTool(working_dir=tmpdir)
+            tool._set_cached("test_key", "test_value")
+            assert tool._get_cached("test_key") == "test_value"
+
+    def test_cache_expired_returns_none(self):
+        """Expired cache entries should return None."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tool = WebTool(working_dir=tmpdir)
+            # Set cache with old timestamp
+            tool._cache["old_key"] = {"data": "old_value", "ts": time.time() - 999999}
+            assert tool._get_cached("old_key") is None
+
+    def test_cache_persists_to_disk(self):
+        """Cache should be saved to disk."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tool = WebTool(working_dir=tmpdir)
+            tool._set_cached("persist_key", "persist_value")
+
+            # Verify file exists
+            assert tool.cache_file.exists()
+
+            # Load fresh and check
+            data = json.loads(tool.cache_file.read_text())
+            assert "persist_key" in data
+
+    def test_html_to_text(self):
+        """HTML should be converted to plain text."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tool = WebTool(working_dir=tmpdir)
+            html = "<html><body><p>Hello <b>World</b></p><script>evil()</script></body></html>"
+            text = tool._html_to_text(html)
+            assert "Hello" in text
+            assert "World" in text
+            assert "evil" not in text
+            assert "<" not in text
+
+
+class TestToolsRegistry:
+    """Tests for the tools registry."""
+
+    def test_builtin_tools_complete(self):
+        """All built-in tools should be registered."""
+        assert "filesystem" in BUILTIN_TOOLS
+        assert "shell" in BUILTIN_TOOLS
+        assert "git" in BUILTIN_TOOLS
+        assert "web" in BUILTIN_TOOLS
+        assert "sandbox" in BUILTIN_TOOLS
+
+    def test_all_tools_instantiate(self):
+        """All built-in tools should be constructable."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            for name, tool_class in BUILTIN_TOOLS.items():
+                # SandboxTool uses project_dir, others use working_dir
+                if name == "sandbox":
+                    tool = tool_class(project_dir=tmpdir)
+                else:
+                    tool = tool_class(working_dir=tmpdir)
+                assert tool is not None
+                assert hasattr(tool, "get_tool_definitions")
+                assert hasattr(tool, "execute")
+
+    def test_all_tools_have_definitions(self):
+        """All tools should return at least one definition."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            for name, tool_class in BUILTIN_TOOLS.items():
+                if name == "sandbox":
+                    tool = tool_class(project_dir=tmpdir)
+                else:
+                    tool = tool_class(working_dir=tmpdir)
+                defs = tool.get_tool_definitions()
+                assert len(defs) >= 1, f"{name} has no tool definitions"
