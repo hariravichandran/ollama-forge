@@ -1,0 +1,17 @@
+# Example: Create your own agent by copying this template to agents/
+# and modifying it to your needs.
+
+name: my-agent
+description: "Brief description of what this agent does"
+model: ""  # leave empty for auto-detection, or specify e.g. "llama3.1:8b"
+system_prompt: |
+  You are a specialized assistant for [YOUR DOMAIN].
+  Describe the agent's role, capabilities, and guidelines here.
+  The more specific you are, the better the agent will perform.
+tools:
+  - filesystem   # read, write, edit, search files
+  - shell        # run shell commands
+  - git          # git operations
+  - web          # web search and fetch
+temperature: 0.7  # 0.0 = deterministic, 1.0 = creative
+max_context: 8192  # adjust based on your hardware profile
