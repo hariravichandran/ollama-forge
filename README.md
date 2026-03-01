@@ -9,15 +9,24 @@ A free, open-source alternative to paid AI coding assistants. Run powerful AI ag
 ollama-forge turns your machine into a full AI development environment:
 
 - **Hardware auto-detection** — Detects your GPU (AMD ROCm, NVIDIA CUDA, Apple Silicon, Intel) and optimizes Ollama automatically
+- **CPU-only support** — No GPU? No problem. Uses RAM-based model sizing with optimized thread counts
 - **Cross-platform** — Linux, macOS, and Windows support
 - **Context compression** — Intelligent conversation summarization so you never hit context limits
 - **Multi-agent framework** — Create, manage, and orchestrate single-agent and multi-agent systems
 - **Cascading agents** — Auto-switch to a larger model when the smaller one gets stuck
+- **Codebase indexing** — Indexes symbols across Python, JS/TS, Go, Rust for fast search and agent context
+- **Fuzzy edit matching** — Tolerates whitespace/indentation mistakes from local LLMs with 75%+ similarity fallback
+- **Sandboxed execution** — Run code in isolated environments with resource limits and timeouts
+- **Multi-file edit planner** — Dependency-aware cross-file refactoring with atomic rollback
+- **Session persistence** — Save, resume, and export chat sessions
+- **FIM tab completion** — OpenAI-compatible `/v1/completions` endpoint for editor integrations
+- **Multi-modal images** — Pass images to vision-capable models via CLI or API
+- **Git undo** — Safely revert any `[forge]`-tagged agent commit
 - **Permission system** — Configurable approval levels for tool actions (auto-approve reads, confirm writes, always confirm shell)
 - **MCP integration** — Web search enabled by default, 30+ MCPs available. See the [MCP Guide](docs/mcp-guide.md)
 - **QA agent** — Auto-generates and runs tests for code changes before they ship
 - **Self-improvement** — The framework improves itself using community ideas and latest AI research
-- **Auto-update models** — Keep your local models up to date with one command
+- **OpenAI-compatible API** — Drop-in REST API for Continue.dev and other OpenAI clients
 
 Optimized for **AMD iGPU + ROCm** (our primary target), but works with NVIDIA GPUs, Apple Silicon, and CPU-only setups too.
 
@@ -67,6 +76,8 @@ forge benchmark         # Benchmark inference speed
 ```
 
 ollama-forge detects your GPU, CPU, and RAM, then selects optimal model sizes, context windows, and batch sizes automatically. Supports AMD ROCm, NVIDIA CUDA, Apple Silicon (Metal), and CPU-only.
+
+**CPU-only systems** are first-class citizens — when no GPU is detected, ollama-forge uses available RAM for model sizing, optimizes thread counts (leaving cores for the OS), and recommends appropriately-sized models. Slower than GPU but fully functional.
 
 ### Built-in Agents
 
@@ -163,6 +174,76 @@ Or manage MCPs in natural language during chat:
 
 See the full [MCP Guide](docs/mcp-guide.md) for all available MCPs, configuration, and how to create your own.
 
+### Codebase Indexing
+
+Index your project for fast symbol search and context retrieval:
+
+```bash
+forge index             # Build/update the codebase index
+forge search "ClassName" # Search symbols, files, and content
+```
+
+Supports Python, JavaScript/TypeScript, Go, and Rust. Persistent index in `.forge/index/` with incremental updates. Agents use the index to find relevant code before making changes.
+
+### Sandboxed Execution
+
+Agents run code in isolated sandboxes with resource limits:
+- Timeout enforcement (default 30s)
+- Memory limits on Linux/macOS
+- Temporary directory isolation — sandbox artifacts don't pollute your project
+- Supports Python scripts, shell commands, and test runners
+
+### Fuzzy Edit Matching
+
+Local LLMs sometimes get whitespace or indentation slightly wrong. ollama-forge uses fuzzy matching as a fallback when exact string replacement fails — finding the closest match above a 75% similarity threshold. This makes file edits significantly more reliable with smaller models.
+
+### Multi-File Edit Planning
+
+For cross-file refactoring, the edit planner:
+1. Analyzes Python import dependencies to determine edit order
+2. Generates a coordinated edit plan using the LLM
+3. Executes changes atomically — all edits succeed, or all roll back
+
+### Session Persistence
+
+Save and resume chat sessions:
+
+```bash
+# Sessions are saved automatically — resume by ID
+forge chat --session abc12345
+```
+
+Supports partial ID matching, markdown/JSON export, and auto-generated titles.
+
+### Fill-in-the-Middle (FIM)
+
+Tab-completion endpoint for editor integrations (Continue.dev, etc.):
+
+```
+POST /v1/completions
+{"prompt": "def fibonacci(", "suffix": "    return result", "max_tokens": 100}
+```
+
+Uses Ollama's native FIM support with the `suffix` parameter.
+
+### Multi-Modal Images
+
+Pass images to vision-capable models:
+
+```bash
+forge chat --image screenshot.png    # Analyze an image in chat
+```
+
+### Git Undo
+
+Safely revert agent-made changes:
+
+```bash
+forge undo    # Revert the last [forge]-tagged commit
+```
+
+All agent commits are tagged with `[forge]` for easy identification and safe reversal.
+
 ### Context Compression
 
 Never hit context limits again. ollama-forge automatically compresses older conversation history while preserving key information (code blocks, decisions, file paths).
@@ -232,12 +313,12 @@ Disable anytime with `FORGE_SELF_IMPROVE=0` in `.env`.
 │                       ▼                                  │
 │  ┌────────────────────────────────────────────────────┐  │
 │  │         Tools + MCP Servers (30+ available)        │  │
-│  │  filesystem │ shell │ git │ web search │ ...       │  │
+│  │  filesystem │ shell │ git │ web │ sandbox │ index  │  │
 │  └────────────────────┬───────────────────────────────┘  │
 │                       ▼                                  │
 │  ┌────────────────────────────────────────────────────┐  │
 │  │           LLM Layer (Ollama)                        │  │
-│  │  context compression │ model management │ streaming │  │
+│  │  context compression │ model mgmt │ FIM │ streaming │  │
 │  └────────────────────┬───────────────────────────────┘  │
 │                       ▼                                  │
 │  ┌────────────────────────────────────────────────────┐  │
@@ -262,6 +343,8 @@ Community contributions arrive as PRs against `main`. Only the repo owner merges
 | standard | 8-20 GB | qwen2.5-coder:7b | 8,192 |
 | workstation | 20-60 GB | qwen2.5-coder:14b | 32,768 |
 | high_memory | 60+ GB | qwen2.5-coder:32b | 65,536 |
+
+**CPU-only systems**: Profile is selected by available RAM (total minus 4 GB OS reservation). Thread count is capped 2 below your total to keep the system responsive. Batch sizes are reduced for better CPU throughput.
 
 ## Requirements
 

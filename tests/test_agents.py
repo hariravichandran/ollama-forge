@@ -1191,3 +1191,250 @@ class TestToolsRegistration:
         tool = SandboxTool()
         assert tool.name == "sandbox"
         assert tool.sandbox is not None
+
+
+# ─── Edit Planner Tests ────────────────────────────────────────────────────
+
+
+class TestEditPlanner:
+    """Tests for multi-file edit planning."""
+
+    def test_edit_plan_summary(self):
+        from forge.agents.planner import EditPlan, FileEdit
+
+        plan = EditPlan(
+            task="Rename function",
+            files=[
+                FileEdit(path="a.py", description="Update definition", edits=[
+                    {"old_string": "def old_name", "new_string": "def new_name"},
+                ]),
+                FileEdit(path="b.py", description="Update import", edits=[
+                    {"old_string": "from a import old_name", "new_string": "from a import new_name"},
+                ]),
+            ],
+        )
+        summary = plan.summary()
+        assert "Rename function" in summary
+        assert "a.py" in summary
+        assert "b.py" in summary
+        assert plan.file_count == 2
+
+    def test_execute_plan_success(self):
+        from forge.agents.planner import EditPlanner, EditPlan, FileEdit
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            # Create source files
+            (Path(tmpdir) / "a.py").write_text("def old_name():\n    pass\n")
+            (Path(tmpdir) / "b.py").write_text("from a import old_name\n")
+
+            planner = EditPlanner(working_dir=tmpdir)
+            plan = EditPlan(
+                task="Rename",
+                files=[
+                    FileEdit(path="a.py", description="def", edits=[
+                        {"old_string": "def old_name", "new_string": "def new_name"},
+                    ]),
+                    FileEdit(path="b.py", description="import", edits=[
+                        {"old_string": "old_name", "new_string": "new_name"},
+                    ]),
+                ],
+                dependency_order=["a.py", "b.py"],
+            )
+
+            result = planner.execute(plan)
+            assert result.success
+            assert len(result.files_modified) == 2
+            assert "new_name" in (Path(tmpdir) / "a.py").read_text()
+            assert "new_name" in (Path(tmpdir) / "b.py").read_text()
+
+    def test_execute_plan_rollback(self):
+        from forge.agents.planner import EditPlanner, EditPlan, FileEdit
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            (Path(tmpdir) / "a.py").write_text("original content\n")
+            (Path(tmpdir) / "b.py").write_text("also original\n")
+
+            planner = EditPlanner(working_dir=tmpdir)
+            plan = EditPlan(
+                task="Bad rename",
+                files=[
+                    FileEdit(path="a.py", description="ok edit", edits=[
+                        {"old_string": "original content", "new_string": "new content"},
+                    ]),
+                    FileEdit(path="b.py", description="will fail", edits=[
+                        {"old_string": "nonexistent string", "new_string": "something"},
+                    ]),
+                ],
+                dependency_order=["a.py", "b.py"],
+            )
+
+            result = planner.execute(plan)
+            assert not result.success
+            assert result.rolled_back
+            # Original content should be restored
+            assert "original content" in (Path(tmpdir) / "a.py").read_text()
+
+    def test_create_new_file(self):
+        from forge.agents.planner import EditPlanner, EditPlan, FileEdit
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            planner = EditPlanner(working_dir=tmpdir)
+            plan = EditPlan(
+                task="Create file",
+                files=[
+                    FileEdit(
+                        path="new_module.py",
+                        description="Create new module",
+                        create=True,
+                        new_content="# New module\ndef hello(): pass\n",
+                    ),
+                ],
+            )
+
+            result = planner.execute(plan)
+            assert result.success
+            assert (Path(tmpdir) / "new_module.py").exists()
+
+    def test_analyze_dependencies(self):
+        from forge.agents.planner import EditPlanner
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            (Path(tmpdir) / "models.py").write_text("class User: pass\n")
+            (Path(tmpdir) / "views.py").write_text("from models import User\n")
+
+            planner = EditPlanner(working_dir=tmpdir)
+            files = planner._get_project_files()
+            deps = planner._analyze_dependencies(files)
+            # views.py depends on models.py
+            assert "models.py" in deps.get("views.py", [])
+
+
+# ─── Session Tests ──────────────────────────────────────────────────────────
+
+
+class TestSessionManager:
+    """Tests for session persistence."""
+
+    def test_save_and_load(self):
+        from forge.agents.sessions import SessionManager
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            mgr = SessionManager(sessions_dir=Path(tmpdir))
+            messages = [
+                {"role": "user", "content": "Hello"},
+                {"role": "assistant", "content": "Hi there!"},
+            ]
+
+            session_id = mgr.save(messages, agent_name="test")
+            assert session_id.startswith("session-")
+
+            session = mgr.load(session_id)
+            assert session is not None
+            assert session.message_count == 2
+            assert session.agent_name == "test"
+
+    def test_list_sessions(self):
+        from forge.agents.sessions import SessionManager
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            mgr = SessionManager(sessions_dir=Path(tmpdir))
+
+            mgr.save([{"role": "user", "content": "First"}], title="Session 1")
+            mgr.save([{"role": "user", "content": "Second"}], title="Session 2")
+
+            sessions = mgr.list_sessions()
+            assert len(sessions) == 2
+
+    def test_delete_session(self):
+        from forge.agents.sessions import SessionManager
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            mgr = SessionManager(sessions_dir=Path(tmpdir))
+            sid = mgr.save([{"role": "user", "content": "Delete me"}])
+
+            assert mgr.delete(sid)
+            assert mgr.load(sid) is None
+
+    def test_export_markdown(self):
+        from forge.agents.sessions import SessionManager
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            mgr = SessionManager(sessions_dir=Path(tmpdir))
+            messages = [
+                {"role": "user", "content": "What is Python?"},
+                {"role": "assistant", "content": "Python is a programming language."},
+            ]
+            sid = mgr.save(messages, agent_name="assistant", title="Python Q&A")
+
+            md = mgr.export(sid, format="markdown")
+            assert "Python Q&A" in md
+            assert "**User:**" in md
+            assert "**Assistant:**" in md
+
+    def test_export_json(self):
+        from forge.agents.sessions import SessionManager
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            mgr = SessionManager(sessions_dir=Path(tmpdir))
+            sid = mgr.save([{"role": "user", "content": "test"}])
+
+            exported = mgr.export(sid, format="json")
+            data = json.loads(exported)
+            assert data["session_id"] == sid
+
+    def test_partial_id_match(self):
+        from forge.agents.sessions import SessionManager
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            mgr = SessionManager(sessions_dir=Path(tmpdir))
+            sid = mgr.save([{"role": "user", "content": "partial"}])
+
+            # Load with partial ID (first 12 chars)
+            session = mgr.load(sid[:12])
+            assert session is not None
+
+    def test_auto_title_generation(self):
+        from forge.agents.sessions import SessionManager
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            mgr = SessionManager(sessions_dir=Path(tmpdir))
+            sid = mgr.save([{"role": "user", "content": "How do I install Docker?"}])
+
+            session = mgr.load(sid)
+            assert "Docker" in session.title
+
+    def test_update_existing_session(self):
+        from forge.agents.sessions import SessionManager
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            mgr = SessionManager(sessions_dir=Path(tmpdir))
+            messages1 = [{"role": "user", "content": "Hello"}]
+            sid = mgr.save(messages1, title="Test")
+
+            # Update with more messages
+            messages2 = messages1 + [
+                {"role": "assistant", "content": "Hi!"},
+                {"role": "user", "content": "How are you?"},
+            ]
+            mgr.save(messages2, session_id=sid)
+
+            session = mgr.load(sid)
+            assert session.message_count == 3
+
+    def test_session_summary(self):
+        from forge.agents.sessions import Session
+        import time
+
+        session = Session(
+            session_id="session-test1234",
+            title="Test Session",
+            agent_name="coder",
+            model="qwen2.5:7b",
+            messages=[{"role": "user", "content": "hi"}],
+            created_at=time.time() - 3600,
+            updated_at=time.time() - 60,
+        )
+        summary = session.summary()
+        assert "session-" in summary
+        assert "Test Session" in summary
+        assert "coder" in summary

@@ -139,3 +139,88 @@ class TestHardwareProfiles:
         assert "Coding" in categories
         assert "General chat" in categories
         assert "Reasoning" in categories
+
+
+class TestCPUOnlyMode:
+    """Tests for CPU-only systems (no GPU acceleration)."""
+
+    def test_cpu_only_detection(self):
+        """CPU-only should be detected as vendor=none."""
+        gpu = GPUInfo()  # default: vendor="none"
+        assert gpu.vendor == "none"
+        assert gpu.driver == ""
+
+    def test_cpu_only_profile_selection(self):
+        """CPU-only system should get a profile based on RAM."""
+        hw = HardwareInfo(
+            gpu=GPUInfo(vendor="none", name="CPU only", driver="cpu"),
+            cpu=CPUInfo(threads=8, cores=4),
+            ram_gb=16.0,
+        )
+        profile = select_profile(hw)
+        # 16 GB RAM - 4 GB OS = 12 GB usable -> standard (≥8 GB)
+        assert profile.name == "standard"
+        assert profile.is_cpu_only
+
+    def test_cpu_only_low_ram(self):
+        """Low-RAM CPU-only system should get smallest model."""
+        hw = HardwareInfo(
+            gpu=GPUInfo(vendor="none", name="CPU only", driver="cpu"),
+            cpu=CPUInfo(threads=4, cores=2),
+            ram_gb=4.0,
+        )
+        profile = select_profile(hw)
+        assert profile.is_cpu_only
+        assert "1.5b" in profile.recommended_model or "0.5b" in profile.recommended_model
+
+    def test_cpu_only_high_ram(self):
+        """High-RAM CPU-only system should get larger models."""
+        hw = HardwareInfo(
+            gpu=GPUInfo(vendor="none", name="CPU only", driver="cpu"),
+            cpu=CPUInfo(threads=16, cores=8),
+            ram_gb=64.0,
+        )
+        profile = select_profile(hw)
+        assert profile.is_cpu_only
+        # 64 GB RAM - 4 GB = 60 GB -> workstation or high_memory
+        assert profile.name in ("workstation", "high_memory")
+
+    def test_cpu_only_thread_optimization(self):
+        """CPU-only should use most but not all threads."""
+        hw = HardwareInfo(
+            gpu=GPUInfo(vendor="none", name="CPU only", driver="cpu"),
+            cpu=CPUInfo(threads=8, cores=4),
+            ram_gb=16.0,
+        )
+        profile = select_profile(hw)
+        # Should leave 2 threads for OS
+        assert profile.max_threads <= 8
+        assert profile.max_threads >= 4
+
+    def test_cpu_only_batch_size(self):
+        """CPU-only should have smaller batch size."""
+        hw = HardwareInfo(
+            gpu=GPUInfo(vendor="none", name="CPU only", driver="cpu"),
+            cpu=CPUInfo(threads=8, cores=4),
+            ram_gb=16.0,
+        )
+        profile = select_profile(hw)
+        assert profile.num_batch <= 512
+
+    def test_cpu_only_recommendations(self):
+        """CPU-only recommendations should mention CPU-only."""
+        hw = HardwareInfo(
+            gpu=GPUInfo(vendor="none", name="CPU only", driver="cpu"),
+            cpu=CPUInfo(threads=8, cores=4),
+            ram_gb=16.0,
+        )
+        recs = recommend_models(hw)
+        coding_rec = next(r for r in recs if r["category"] == "Coding")
+        assert "CPU" in coding_rec["reason"]
+
+    def test_rocm_noop_on_cpu_only(self):
+        """ROCm configuration should be a no-op for CPU-only."""
+        from forge.hardware.rocm import configure_rocm_env
+        gpu = GPUInfo(vendor="none", name="CPU only", driver="cpu")
+        env_vars = configure_rocm_env(gpu)
+        assert len(env_vars) == 0  # no env vars set

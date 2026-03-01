@@ -6,6 +6,7 @@ ollama-forge's agent system.
 
 Endpoints:
 - POST /v1/chat/completions — Chat completions (streaming and non-streaming)
+- POST /v1/completions      — FIM completions (for tab autocomplete)
 - GET  /v1/models           — List available models
 - GET  /health              — Health check
 
@@ -14,6 +15,7 @@ Usage:
     forge api --port 9000        # Custom port
 
     # In your client, set base_url to http://localhost:8000/v1
+    # Compatible with Continue.dev, Cursor, and any OpenAI SDK client
 """
 
 from __future__ import annotations
@@ -76,6 +78,20 @@ def create_app():
         stream: bool = False
         top_p: float = 1.0
         n: int = 1
+        stop: list[str] | str | None = None
+
+    class CompletionRequest(BaseModel):
+        """FIM (Fill-in-the-Middle) completion request.
+
+        Used by tab autocomplete clients. The prompt contains the code
+        before the cursor, and suffix contains code after the cursor.
+        """
+        model: str = ""
+        prompt: str
+        suffix: str = ""
+        max_tokens: int = 256
+        temperature: float = 0.2
+        stream: bool = False
         stop: list[str] | str | None = None
 
     # ─── Endpoints ──────────────────────────────────────────────────────
@@ -157,25 +173,74 @@ def create_app():
             },
         }
 
+    @app.post("/v1/completions")
+    def completions(request: CompletionRequest):
+        """FIM (Fill-in-the-Middle) completion endpoint.
+
+        Used by tab autocomplete clients (Continue.dev, Cursor, etc.).
+        Sends prefix and suffix to the model for infill completion.
+        """
+        client = get_client()
+
+        if not client.is_available():
+            raise HTTPException(503, "Ollama is not running")
+
+        if request.model and request.model != client.model:
+            client.switch_model(request.model)
+
+        if request.stream:
+            return StreamingResponse(
+                _stream_fim_response(client, request),
+                media_type="text/event-stream",
+            )
+
+        # Non-streaming FIM
+        result = _generate_fim(client, request)
+        completion_id = f"cmpl-{uuid.uuid4().hex[:12]}"
+
+        return {
+            "id": completion_id,
+            "object": "text_completion",
+            "created": int(time.time()),
+            "model": client.model,
+            "choices": [
+                {
+                    "index": 0,
+                    "text": result.get("response", ""),
+                    "finish_reason": "stop",
+                }
+            ],
+            "usage": {
+                "prompt_tokens": 0,
+                "completion_tokens": result.get("tokens", 0),
+                "total_tokens": result.get("tokens", 0),
+            },
+        }
+
+    # ─── Helpers ────────────────────────────────────────────────────────
+
     def _stream_response(client, messages, request):
         """Generate SSE stream in OpenAI format."""
         completion_id = f"chatcmpl-{uuid.uuid4().hex[:12]}"
 
-        for chunk in client.stream_chat(messages):
-            data = {
-                "id": completion_id,
-                "object": "chat.completion.chunk",
-                "created": int(time.time()),
-                "model": client.model,
-                "choices": [
-                    {
-                        "index": 0,
-                        "delta": {"content": chunk},
-                        "finish_reason": None,
-                    }
-                ],
-            }
-            yield f"data: {json.dumps(data)}\n\n"
+        for event in client.stream_chat(messages):
+            if event.get("type") == "text":
+                data = {
+                    "id": completion_id,
+                    "object": "chat.completion.chunk",
+                    "created": int(time.time()),
+                    "model": client.model,
+                    "choices": [
+                        {
+                            "index": 0,
+                            "delta": {"content": event["content"]},
+                            "finish_reason": None,
+                        }
+                    ],
+                }
+                yield f"data: {json.dumps(data)}\n\n"
+            elif event.get("type") == "done":
+                break
 
         # Final chunk
         data = {
@@ -194,6 +259,101 @@ def create_app():
         yield f"data: {json.dumps(data)}\n\n"
         yield "data: [DONE]\n\n"
 
+    def _generate_fim(client, request):
+        """Generate FIM completion using Ollama's suffix parameter."""
+        import requests as req
+
+        payload: dict[str, Any] = {
+            "model": client.model,
+            "prompt": request.prompt,
+            "stream": False,
+            "keep_alive": client.keep_alive,
+            "options": {
+                "temperature": request.temperature,
+                "num_predict": request.max_tokens,
+                "num_ctx": client.num_ctx,
+            },
+        }
+        if request.suffix:
+            payload["suffix"] = request.suffix
+        if request.stop:
+            stops = request.stop if isinstance(request.stop, list) else [request.stop]
+            payload["options"]["stop"] = stops
+
+        try:
+            r = req.post(
+                f"{client.base_url}/api/generate",
+                json=payload,
+                timeout=30,
+            )
+            if r.status_code == 200:
+                return r.json()
+        except Exception:
+            pass
+        return {"response": "", "tokens": 0}
+
+    def _stream_fim_response(client, request):
+        """Stream FIM completion in OpenAI format."""
+        import requests as req
+
+        completion_id = f"cmpl-{uuid.uuid4().hex[:12]}"
+
+        payload: dict[str, Any] = {
+            "model": client.model,
+            "prompt": request.prompt,
+            "stream": True,
+            "keep_alive": client.keep_alive,
+            "options": {
+                "temperature": request.temperature,
+                "num_predict": request.max_tokens,
+                "num_ctx": client.num_ctx,
+            },
+        }
+        if request.suffix:
+            payload["suffix"] = request.suffix
+
+        try:
+            r = req.post(
+                f"{client.base_url}/api/generate",
+                json=payload,
+                stream=True,
+                timeout=30,
+            )
+            for line in r.iter_lines():
+                if line:
+                    data = json.loads(line)
+                    text = data.get("response", "")
+                    if text:
+                        chunk = {
+                            "id": completion_id,
+                            "object": "text_completion",
+                            "created": int(time.time()),
+                            "model": client.model,
+                            "choices": [
+                                {
+                                    "index": 0,
+                                    "text": text,
+                                    "finish_reason": None,
+                                }
+                            ],
+                        }
+                        yield f"data: {json.dumps(chunk)}\n\n"
+                    if data.get("done"):
+                        break
+        except Exception:
+            pass
+
+        # Final chunk
+        chunk = {
+            "id": completion_id,
+            "object": "text_completion",
+            "created": int(time.time()),
+            "model": client.model,
+            "choices": [{"index": 0, "text": "", "finish_reason": "stop"}],
+        }
+        yield f"data: {json.dumps(chunk)}\n\n"
+        yield "data: [DONE]\n\n"
+
     return app
 
 
@@ -208,4 +368,5 @@ def run_api_server(port: int = 8000, host: str = "127.0.0.1"):
     app = create_app()
     print(f"Starting ollama-forge API at http://{host}:{port}")
     print(f"OpenAI-compatible endpoint: http://{host}:{port}/v1/chat/completions")
+    print(f"FIM autocomplete endpoint: http://{host}:{port}/v1/completions")
     uvicorn.run(app, host=host, port=port)

@@ -1,4 +1,9 @@
-"""Hardware profiles: map detected hardware to optimal Ollama settings."""
+"""Hardware profiles: map detected hardware to optimal Ollama settings.
+
+Supports CPU-only systems — Ollama runs models on CPU when no GPU is available.
+CPU inference is slower but fully functional. The framework auto-detects this
+and selects appropriately sized models with optimized settings.
+"""
 
 from __future__ import annotations
 
@@ -23,6 +28,7 @@ class HardwareProfile:
     num_batch: int
     max_threads: int
     description: str
+    is_cpu_only: bool = False  # True when running without GPU acceleration
 
 
 # Hardware profiles from compact to high-end
@@ -77,10 +83,23 @@ PROFILES = [
 def select_profile(hw: HardwareInfo) -> HardwareProfile:
     """Select the best hardware profile based on detected hardware.
 
+    For CPU-only systems, uses available RAM to determine model size.
     For iGPUs, uses usable_gb (total minus OS reservation).
     For dGPUs, uses total VRAM.
     """
-    gpu_gb = hw.gpu.usable_gb if hw.gpu.is_igpu else hw.gpu.total_gb
+    is_cpu_only = hw.gpu.vendor == "none" or hw.gpu.driver == "cpu"
+
+    if is_cpu_only:
+        # CPU-only: use RAM to determine model size
+        # Ollama loads models into RAM when no GPU is available
+        # Leave ~4 GB for OS + other apps
+        available_ram = max(0, hw.ram_gb - 4.0)
+        gpu_gb = available_ram
+        log.info("CPU-only mode: using %.1f GB RAM for models (%.1f GB total)", available_ram, hw.ram_gb)
+    elif hw.gpu.is_igpu:
+        gpu_gb = hw.gpu.usable_gb
+    else:
+        gpu_gb = hw.gpu.total_gb
 
     # Select highest profile that fits
     selected = PROFILES[0]  # default to compact
@@ -91,23 +110,49 @@ def select_profile(hw: HardwareInfo) -> HardwareProfile:
     # Adjust thread count to actual hardware
     selected.max_threads = min(selected.max_threads, hw.cpu.threads)
 
-    log.info("Selected profile: %s (%.1f GB usable GPU, %d threads)",
-             selected.name, gpu_gb, selected.max_threads)
+    # Mark CPU-only mode and optimize settings
+    if is_cpu_only:
+        selected.is_cpu_only = True
+        # CPU inference benefits from more threads and smaller batches
+        selected.max_threads = max(1, hw.cpu.threads - 2)  # leave 2 threads for OS
+        selected.num_batch = min(selected.num_batch, 512)  # smaller batches are faster on CPU
+
+        # For very low RAM systems (< 8 GB), force the smallest model
+        if hw.ram_gb < 8:
+            selected.recommended_model = "qwen2.5-coder:1.5b"
+            selected.fallback_model = "qwen2.5-coder:0.5b"
+            selected.num_ctx = 2048
+
+    log.info("Selected profile: %s (%.1f GB %s, %d threads%s)",
+             selected.name, gpu_gb,
+             "RAM" if is_cpu_only else "GPU",
+             selected.max_threads,
+             ", CPU-only" if is_cpu_only else "")
     return selected
 
 
 def recommend_models(hw: HardwareInfo) -> list[dict[str, str]]:
     """Recommend models based on hardware, across different categories."""
     profile = select_profile(hw)
-    gpu_gb = hw.gpu.usable_gb if hw.gpu.is_igpu else hw.gpu.total_gb
+    is_cpu_only = profile.is_cpu_only
+
+    if is_cpu_only:
+        memory_str = f"{hw.ram_gb:.0f} GB RAM, CPU-only"
+    elif hw.gpu.is_igpu:
+        memory_str = f"{hw.gpu.usable_gb:.0f} GB usable"
+    else:
+        memory_str = f"{hw.gpu.total_gb:.0f} GB GPU"
 
     recommendations = []
 
     # Coding models
+    reason = f"Best coding model for your {profile.name} hardware ({memory_str})"
+    if is_cpu_only:
+        reason += ". Slower on CPU but fully functional"
     recommendations.append({
         "category": "Coding",
         "model": profile.recommended_model,
-        "reason": f"Best coding model for your {profile.name} hardware ({gpu_gb:.0f} GB)",
+        "reason": reason,
     })
 
     # General chat
