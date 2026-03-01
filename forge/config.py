@@ -34,6 +34,10 @@ class ForgeConfig:
     # UI settings
     web_port: int = 8080
 
+    # Self-improvement agent (OPT-IN: disabled by default)
+    self_improve_enabled: bool = False
+    self_improve_maintainer: bool = False
+
     # Logging
     log_level: str = "INFO"
 
@@ -67,6 +71,8 @@ def load_config() -> ForgeConfig:
         "FORGE_WEB_SEARCH": "web_search_enabled",
         "FORGE_WEB_PORT": "web_port",
         "FORGE_LOG_LEVEL": "log_level",
+        "FORGE_SELF_IMPROVE": "self_improve_enabled",
+        "FORGE_SELF_IMPROVE_MAINTAINER": "self_improve_maintainer",
     }
     for env_key, config_key in env_overrides.items():
         value = os.environ.get(env_key)

@@ -31,13 +31,16 @@ def main(ctx):
 @click.option("--model", "-m", default="", help="Model to use (auto-detected if empty)")
 @click.option("--agent", "-a", default="assistant", help="Agent to use (assistant, coder, researcher)")
 @click.option("--working-dir", "-d", default=".", help="Working directory for file operations")
-def chat(model: str, agent: str, working_dir: str):
+@click.option("--cascade", is_flag=True, help="Enable cascading: auto-switch to bigger model when stuck")
+@click.option("--auto-approve", is_flag=True, help="Auto-approve all tool actions (skip permission prompts)")
+def chat(model: str, agent: str, working_dir: str, cascade: bool, auto_approve: bool):
     """Start an interactive chat session."""
     from forge.config import load_config
     from forge.hardware import detect_hardware, select_profile
     from forge.hardware.rocm import configure_rocm_env
     from forge.llm.client import OllamaClient
     from forge.agents.orchestrator import AgentOrchestrator
+    from forge.agents.permissions import PermissionManager, AutoApproveManager
 
     config = load_config()
 
@@ -62,10 +65,24 @@ def chat(model: str, agent: str, working_dir: str):
         console.print("[red]Ollama is not running.[/red] Start it with: ollama serve")
         sys.exit(1)
 
+    # Permission manager
+    permissions = AutoApproveManager() if auto_approve else PermissionManager()
+
     # Initialize orchestrator
     orchestrator = AgentOrchestrator(client=client, working_dir=working_dir)
     if agent != "assistant":
         orchestrator.switch_agent(agent)
+
+    # Enable cascade mode if requested
+    if cascade:
+        from forge.agents.cascade import auto_cascade_config, CascadeAgent, CascadeConfig
+        from forge.agents.base import AgentConfig
+        gpu_gb = hw.gpu.usable_gb if hw.gpu else 0
+        cc = auto_cascade_config(gpu_gb)
+        if cc.escalation_model:
+            console.print(f"[dim]Cascade: {cc.primary_model} → {cc.escalation_model}[/dim]")
+        else:
+            console.print("[dim]Cascade: no escalation model available for your hardware[/dim]")
 
     # Print welcome
     console.print(Panel(
@@ -527,15 +544,53 @@ def idea_submit(description: tuple):
 
 @main.command("self-improve")
 @click.option("--iterations", "-n", default=1, help="Number of improvement iterations")
-def self_improve(iterations: int):
-    """Run the self-improvement agent to iterate on ollama-forge."""
-    from forge.config import load_config
+@click.option("--enable", is_flag=True, help="Enable self-improvement (opt-in required on first use)")
+@click.option("--maintainer", is_flag=True, help="Run in maintainer mode (direct push to main)")
+def self_improve(iterations: int, enable: bool, maintainer: bool):
+    """Run the self-improvement agent to iterate on ollama-forge.
+
+    This feature is OPT-IN — disabled by default. Enable it with:
+
+      forge self-improve --enable
+
+    Or set FORGE_SELF_IMPROVE=1 in your .env file.
+
+    \b
+    Two modes:
+    - Contributor (default): Creates GitHub PRs for review. Requires `gh` CLI.
+    - Maintainer (--maintainer): Direct push to main + stable promotion.
+    """
+    from forge.config import load_config, save_config
     from forge.hardware import detect_hardware, select_profile
     from forge.llm.client import OllamaClient
     from forge.community.ideas import IdeaCollector
     from forge.community.self_improve import SelfImproveAgent
 
     config = load_config()
+
+    # Handle --enable flag: persist the opt-in
+    if enable and not config.self_improve_enabled:
+        config.self_improve_enabled = True
+        save_config(config)
+        console.print("[green]Self-improvement enabled.[/green] Thank you for contributing!")
+
+    # Check opt-in
+    if not config.self_improve_enabled:
+        console.print(
+            "[yellow]Self-improvement is disabled by default.[/yellow]\n\n"
+            "This feature uses your spare CPU/GPU resources to improve ollama-forge.\n"
+            "Improvements are submitted as GitHub PRs for review.\n\n"
+            "To enable, run:\n"
+            "  [bold]forge self-improve --enable[/bold]\n\n"
+            "Or set [bold]FORGE_SELF_IMPROVE=1[/bold] in your .env file.\n\n"
+            "You can disable it anytime with [bold]FORGE_SELF_IMPROVE=0[/bold]."
+        )
+        return
+
+    # Determine mode
+    is_maintainer = maintainer or config.self_improve_maintainer
+    mode_label = "maintainer (direct push)" if is_maintainer else "contributor (PRs)"
+
     hw = detect_hardware()
     profile = select_profile(hw)
 
@@ -550,15 +605,26 @@ def self_improve(iterations: int):
         return
 
     collector = IdeaCollector()
-    agent = SelfImproveAgent(client=client, idea_collector=collector)
+    agent = SelfImproveAgent(
+        client=client,
+        idea_collector=collector,
+        maintainer=is_maintainer,
+    )
+
+    console.print(f"[bold]Self-improvement agent[/bold] — mode: [cyan]{mode_label}[/cyan]\n")
 
     for i in range(iterations):
-        console.print(f"\n[bold]Self-improvement iteration {i + 1}/{iterations}[/bold]")
+        console.print(f"\n[bold]Iteration {i + 1}/{iterations}[/bold]")
         with console.status("Evaluating improvements...", spinner="dots"):
             result = agent.run_iteration()
 
         if result:
-            status = "[green]committed[/green]" if result.committed else "[yellow]tested only[/yellow]"
+            if result.pr_url:
+                status = f"[green]PR created: {result.pr_url}[/green]"
+            elif result.committed:
+                status = "[green]committed to main[/green]"
+            else:
+                status = "[yellow]tested only[/yellow]"
             console.print(f"  Result: {result.description} — {status}")
             console.print(f"  Files: {', '.join(result.files_changed)}")
             console.print(f"  Tests: {'passed' if result.tests_passed else 'failed'}")

@@ -7,6 +7,8 @@ import time
 from dataclasses import dataclass, field
 from typing import Any
 
+from forge.agents.permissions import PermissionManager
+from forge.agents.rules import load_project_rules
 from forge.llm.client import OllamaClient
 from forge.llm.context import ContextCompressor
 from forge.tools import BUILTIN_TOOLS
@@ -44,15 +46,27 @@ class BaseAgent:
         client: OllamaClient,
         config: AgentConfig | None = None,
         working_dir: str = ".",
+        permissions: PermissionManager | None = None,
     ):
         self.client = client
         self.config = config or AgentConfig()
         self.working_dir = working_dir
+        self.permissions = permissions or PermissionManager()
         self.messages: list[dict[str, str]] = []
         self.compressor = ContextCompressor(
             client=client,
             max_tokens=self.config.max_context,
         )
+
+        # Load project rules and prepend to system prompt
+        rules = load_project_rules(working_dir)
+        if rules:
+            self._system_prompt = (
+                f"{self.config.system_prompt}\n\n"
+                f"--- Project Rules ---\n{rules}"
+            )
+        else:
+            self._system_prompt = self.config.system_prompt
 
         # Initialize tools
         self._tools: dict[str, Any] = {}
@@ -79,8 +93,8 @@ class BaseAgent:
         # Compress context if needed
         compressed = self.compressor.compress(self.messages)
 
-        # Build messages with system prompt
-        messages = [{"role": "system", "content": self.config.system_prompt}] + compressed
+        # Build messages with system prompt (includes project rules if any)
+        messages = [{"role": "system", "content": self._system_prompt}] + compressed
 
         # Get tool definitions
         tools = self.get_tool_definitions()
@@ -132,7 +146,7 @@ class BaseAgent:
         """Stream a response (no tool use — for simple chat)."""
         self.messages.append({"role": "user", "content": user_message})
         compressed = self.compressor.compress(self.messages)
-        messages = [{"role": "system", "content": self.config.system_prompt}] + compressed
+        messages = [{"role": "system", "content": self._system_prompt}] + compressed
 
         full_response = []
         for chunk in self.client.stream_chat(messages):
@@ -142,7 +156,16 @@ class BaseAgent:
         self.messages.append({"role": "assistant", "content": "".join(full_response)})
 
     def _execute_tool(self, function_name: str, args: dict[str, Any]) -> str:
-        """Route a tool call to the appropriate tool handler."""
+        """Route a tool call to the appropriate tool handler.
+
+        Checks permissions before executing. If the user denies
+        the action, returns a message indicating denial.
+        """
+        # Check permission before executing
+        if not self.permissions.check(function_name, context=args):
+            log.info("Permission denied for %s", function_name)
+            return f"Action '{function_name}' was denied by the user."
+
         for tool in self._tools.values():
             definitions = tool.get_tool_definitions()
             tool_names = [d["function"]["name"] for d in definitions]

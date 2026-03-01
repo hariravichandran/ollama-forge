@@ -11,7 +11,7 @@ class MCPEntry:
 
     name: str
     description: str
-    category: str  # "search", "data", "tools", "productivity", "development"
+    category: str  # "search", "data", "tools", "productivity", "development", "cloud", "communication", "ai"
     builtin: bool  # ships with ollama-forge
     install_cmd: str  # how to install (pip, npm, etc.)
     package: str  # package name
@@ -20,32 +20,15 @@ class MCPEntry:
 
 # Built-in and well-known MCP servers
 MCP_REGISTRY: dict[str, MCPEntry] = {
+    # ─── Search & Web ────────────────────────────────────────────────────────
     "web-search": MCPEntry(
         name="web-search",
         description="Search the web using DuckDuckGo (no API key required)",
         category="search",
         builtin=True,
-        install_cmd="",  # built-in, no install needed
-        package="",
-        config_example={"enabled": True, "max_results": 5, "cache_ttl": 21600},
-    ),
-    "filesystem": MCPEntry(
-        name="filesystem",
-        description="Read, write, and manage files on disk",
-        category="tools",
-        builtin=True,
         install_cmd="",
         package="",
-        config_example={"enabled": True, "root_dir": "."},
-    ),
-    "github": MCPEntry(
-        name="github",
-        description="Interact with GitHub repos, issues, PRs, and actions",
-        category="development",
-        builtin=False,
-        install_cmd="npm install -g @modelcontextprotocol/server-github",
-        package="@modelcontextprotocol/server-github",
-        config_example={"token_env": "GITHUB_TOKEN"},
+        config_example={"enabled": True, "max_results": 5, "cache_ttl": 21600},
     ),
     "brave-search": MCPEntry(
         name="brave-search",
@@ -56,6 +39,73 @@ MCP_REGISTRY: dict[str, MCPEntry] = {
         package="@modelcontextprotocol/server-brave-search",
         config_example={"api_key_env": "BRAVE_API_KEY"},
     ),
+    "fetch": MCPEntry(
+        name="fetch",
+        description="Fetch and extract content from web pages",
+        category="search",
+        builtin=False,
+        install_cmd="pip install mcp-server-fetch",
+        package="mcp-server-fetch",
+        config_example={},
+    ),
+    "tavily": MCPEntry(
+        name="tavily",
+        description="AI-powered search engine for accurate, real-time results",
+        category="search",
+        builtin=False,
+        install_cmd="npm install -g tavily-mcp",
+        package="tavily-mcp",
+        config_example={"api_key_env": "TAVILY_API_KEY"},
+    ),
+    "exa": MCPEntry(
+        name="exa",
+        description="Neural search engine — find content by meaning, not just keywords",
+        category="search",
+        builtin=False,
+        install_cmd="npm install -g exa-mcp-server",
+        package="exa-mcp-server",
+        config_example={"api_key_env": "EXA_API_KEY"},
+    ),
+
+    # ─── File & Data ─────────────────────────────────────────────────────────
+    "filesystem": MCPEntry(
+        name="filesystem",
+        description="Read, write, and manage files on disk",
+        category="tools",
+        builtin=True,
+        install_cmd="",
+        package="",
+        config_example={"enabled": True, "root_dir": "."},
+    ),
+    "memory": MCPEntry(
+        name="memory",
+        description="Persistent knowledge graph for long-term memory across sessions",
+        category="tools",
+        builtin=False,
+        install_cmd="npm install -g @modelcontextprotocol/server-memory",
+        package="@modelcontextprotocol/server-memory",
+        config_example={"storage_path": "~/.config/ollama-forge/memory"},
+    ),
+    "pandoc": MCPEntry(
+        name="pandoc",
+        description="Document conversion — convert between Markdown, PDF, DOCX, HTML, and more",
+        category="tools",
+        builtin=False,
+        install_cmd="npm install -g mcp-pandoc",
+        package="mcp-pandoc",
+        config_example={},
+    ),
+    "everart": MCPEntry(
+        name="everart",
+        description="AI image generation and manipulation",
+        category="tools",
+        builtin=False,
+        install_cmd="npm install -g @modelcontextprotocol/server-everart",
+        package="@modelcontextprotocol/server-everart",
+        config_example={"api_key_env": "EVERART_API_KEY"},
+    ),
+
+    # ─── Databases ───────────────────────────────────────────────────────────
     "sqlite": MCPEntry(
         name="sqlite",
         description="Query and manage SQLite databases",
@@ -64,24 +114,6 @@ MCP_REGISTRY: dict[str, MCPEntry] = {
         install_cmd="npm install -g @modelcontextprotocol/server-sqlite",
         package="@modelcontextprotocol/server-sqlite",
         config_example={"db_path": "example.db"},
-    ),
-    "puppeteer": MCPEntry(
-        name="puppeteer",
-        description="Browser automation — navigate pages, take screenshots, fill forms",
-        category="tools",
-        builtin=False,
-        install_cmd="npm install -g @modelcontextprotocol/server-puppeteer",
-        package="@modelcontextprotocol/server-puppeteer",
-        config_example={},
-    ),
-    "memory": MCPEntry(
-        name="memory",
-        description="Persistent knowledge graph for long-term memory",
-        category="productivity",
-        builtin=False,
-        install_cmd="npm install -g @modelcontextprotocol/server-memory",
-        package="@modelcontextprotocol/server-memory",
-        config_example={"storage_path": "~/.config/ollama-forge/memory"},
     ),
     "postgres": MCPEntry(
         name="postgres",
@@ -92,23 +124,177 @@ MCP_REGISTRY: dict[str, MCPEntry] = {
         package="@modelcontextprotocol/server-postgres",
         config_example={"connection_string_env": "DATABASE_URL"},
     ),
+    "mysql": MCPEntry(
+        name="mysql",
+        description="Query and manage MySQL databases",
+        category="data",
+        builtin=False,
+        install_cmd="npm install -g @benborla29/mcp-server-mysql",
+        package="@benborla29/mcp-server-mysql",
+        config_example={"connection_string_env": "MYSQL_URL"},
+    ),
+    "redis": MCPEntry(
+        name="redis",
+        description="Redis key-value store operations",
+        category="data",
+        builtin=False,
+        install_cmd="npm install -g @punkpeye/mcp-server-redis",
+        package="@punkpeye/mcp-server-redis",
+        config_example={"url": "redis://localhost:6379"},
+    ),
+    "mongodb": MCPEntry(
+        name="mongodb",
+        description="Query and manage MongoDB databases",
+        category="data",
+        builtin=False,
+        install_cmd="npm install -g mcp-mongo-server",
+        package="mcp-mongo-server",
+        config_example={"connection_string_env": "MONGODB_URI"},
+    ),
+
+    # ─── Development Tools ───────────────────────────────────────────────────
+    "github": MCPEntry(
+        name="github",
+        description="Interact with GitHub repos, issues, PRs, and actions",
+        category="development",
+        builtin=False,
+        install_cmd="npm install -g @modelcontextprotocol/server-github",
+        package="@modelcontextprotocol/server-github",
+        config_example={"token_env": "GITHUB_TOKEN"},
+    ),
+    "gitlab": MCPEntry(
+        name="gitlab",
+        description="Interact with GitLab repos, issues, merge requests, and CI/CD",
+        category="development",
+        builtin=False,
+        install_cmd="npm install -g @zereight/mcp-gitlab",
+        package="@zereight/mcp-gitlab",
+        config_example={"token_env": "GITLAB_TOKEN", "base_url": "https://gitlab.com"},
+    ),
+    "docker": MCPEntry(
+        name="docker",
+        description="Manage Docker containers, images, and compose stacks",
+        category="development",
+        builtin=False,
+        install_cmd="npm install -g mcp-docker",
+        package="mcp-docker",
+        config_example={},
+    ),
+    "sentry": MCPEntry(
+        name="sentry",
+        description="Access Sentry error tracking — view issues, stack traces, and events",
+        category="development",
+        builtin=False,
+        install_cmd="npm install -g @modelcontextprotocol/server-sentry",
+        package="@modelcontextprotocol/server-sentry",
+        config_example={"token_env": "SENTRY_AUTH_TOKEN"},
+    ),
+
+    # ─── Productivity ────────────────────────────────────────────────────────
     "slack": MCPEntry(
         name="slack",
-        description="Send and read Slack messages",
+        description="Send and read Slack messages, manage channels",
         category="productivity",
         builtin=False,
         install_cmd="npm install -g @modelcontextprotocol/server-slack",
         package="@modelcontextprotocol/server-slack",
         config_example={"token_env": "SLACK_BOT_TOKEN"},
     ),
-    "fetch": MCPEntry(
-        name="fetch",
-        description="Fetch and extract content from web pages",
+    "google-drive": MCPEntry(
+        name="google-drive",
+        description="Search, read, and manage Google Drive files",
+        category="productivity",
+        builtin=False,
+        install_cmd="npm install -g @modelcontextprotocol/server-google-drive",
+        package="@modelcontextprotocol/server-google-drive",
+        config_example={"credentials_env": "GOOGLE_CREDENTIALS"},
+    ),
+    "notion": MCPEntry(
+        name="notion",
+        description="Read and manage Notion pages, databases, and workspaces",
+        category="productivity",
+        builtin=False,
+        install_cmd="npm install -g notion-mcp-server",
+        package="notion-mcp-server",
+        config_example={"token_env": "NOTION_TOKEN"},
+    ),
+    "linear": MCPEntry(
+        name="linear",
+        description="Manage Linear issues, projects, and workflows",
+        category="productivity",
+        builtin=False,
+        install_cmd="npm install -g @modelcontextprotocol/server-linear",
+        package="@modelcontextprotocol/server-linear",
+        config_example={"api_key_env": "LINEAR_API_KEY"},
+    ),
+    "todoist": MCPEntry(
+        name="todoist",
+        description="Manage Todoist tasks, projects, and labels",
+        category="productivity",
+        builtin=False,
+        install_cmd="npm install -g todoist-mcp-server",
+        package="todoist-mcp-server",
+        config_example={"api_key_env": "TODOIST_API_KEY"},
+    ),
+
+    # ─── Browser Automation ──────────────────────────────────────────────────
+    "puppeteer": MCPEntry(
+        name="puppeteer",
+        description="Browser automation — navigate pages, take screenshots, fill forms",
         category="tools",
         builtin=False,
-        install_cmd="pip install mcp-server-fetch",
-        package="mcp-server-fetch",
+        install_cmd="npm install -g @modelcontextprotocol/server-puppeteer",
+        package="@modelcontextprotocol/server-puppeteer",
         config_example={},
+    ),
+    "playwright": MCPEntry(
+        name="playwright",
+        description="Advanced browser automation with multi-browser support",
+        category="tools",
+        builtin=False,
+        install_cmd="npm install -g @anthropic/mcp-playwright",
+        package="@anthropic/mcp-playwright",
+        config_example={"browser": "chromium"},
+    ),
+
+    # ─── Cloud & Infrastructure ──────────────────────────────────────────────
+    "aws": MCPEntry(
+        name="aws",
+        description="Manage AWS services — S3, EC2, Lambda, CloudFormation, and more",
+        category="cloud",
+        builtin=False,
+        install_cmd="npm install -g aws-mcp",
+        package="aws-mcp",
+        config_example={"profile": "default", "region": "us-east-1"},
+    ),
+    "cloudflare": MCPEntry(
+        name="cloudflare",
+        description="Manage Cloudflare Workers, DNS, and R2 storage",
+        category="cloud",
+        builtin=False,
+        install_cmd="npm install -g @cloudflare/mcp-server-cloudflare",
+        package="@cloudflare/mcp-server-cloudflare",
+        config_example={"token_env": "CLOUDFLARE_API_TOKEN"},
+    ),
+    "vercel": MCPEntry(
+        name="vercel",
+        description="Manage Vercel deployments, projects, and domains",
+        category="cloud",
+        builtin=False,
+        install_cmd="npm install -g vercel-mcp",
+        package="vercel-mcp",
+        config_example={"token_env": "VERCEL_TOKEN"},
+    ),
+
+    # ─── Communication ───────────────────────────────────────────────────────
+    "discord": MCPEntry(
+        name="discord",
+        description="Read and send Discord messages, manage channels",
+        category="communication",
+        builtin=False,
+        install_cmd="npm install -g discord-mcp-server",
+        package="discord-mcp-server",
+        config_example={"token_env": "DISCORD_BOT_TOKEN"},
     ),
 }
 
@@ -135,13 +321,29 @@ def suggest_mcps(context: str) -> list[MCPEntry]:
     suggestions = []
     keyword_map = {
         "github": ["github", "repo", "pull request", "issue", "PR"],
-        "sqlite": ["sqlite", "database", "sql", "query"],
+        "gitlab": ["gitlab", "merge request", "MR", "ci/cd"],
+        "sqlite": ["sqlite", "database", "sql", "query", "db file"],
         "postgres": ["postgres", "postgresql", "database"],
-        "puppeteer": ["browser", "screenshot", "web page", "scrape"],
-        "brave-search": ["search", "find online", "look up"],
+        "mysql": ["mysql", "mariadb"],
+        "mongodb": ["mongodb", "mongo", "nosql", "document database"],
+        "redis": ["redis", "cache", "key-value"],
+        "puppeteer": ["browser", "screenshot", "web page", "scrape", "headless"],
+        "playwright": ["browser automation", "end-to-end test", "e2e"],
+        "brave-search": ["search", "find online", "look up", "brave"],
+        "tavily": ["research", "accurate search", "ai search"],
         "slack": ["slack", "message", "channel"],
-        "memory": ["remember", "recall", "knowledge"],
-        "fetch": ["fetch", "download", "web page", "url"],
+        "discord": ["discord", "server", "bot"],
+        "memory": ["remember", "recall", "knowledge", "long-term"],
+        "fetch": ["fetch", "download", "web page", "url", "http"],
+        "docker": ["docker", "container", "compose", "image"],
+        "google-drive": ["google drive", "gdrive", "google docs"],
+        "notion": ["notion", "wiki", "notes"],
+        "linear": ["linear", "issue tracker", "project management"],
+        "todoist": ["todoist", "todo", "task list"],
+        "sentry": ["sentry", "error tracking", "crash", "stack trace"],
+        "aws": ["aws", "amazon", "s3", "ec2", "lambda"],
+        "cloudflare": ["cloudflare", "workers", "dns", "cdn"],
+        "pandoc": ["convert", "pdf", "docx", "document conversion"],
     }
 
     for mcp_name, keywords in keyword_map.items():

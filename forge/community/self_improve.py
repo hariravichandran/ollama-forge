@@ -5,12 +5,21 @@ This agent:
 2. Searches the web for latest AI/LLM advances
 3. Proposes improvements to the codebase
 4. Tests changes before committing
-5. Commits to main branch (never directly to stable)
-6. Respects stable branch policy: max 1 push per 2 days
+5. Contributors: creates a GitHub PR for review
+6. Maintainers: commits directly to main, may promote to stable
+7. Respects stable branch policy: max 1 push per 2 days
+
+Contribution modes:
+- contributor (default): Forks + creates PRs via `gh` CLI. No direct push access.
+- maintainer: Direct push to main + stable branch promotion. Only for repo owner
+  and their AI agents.
+
+This feature is OPT-IN: disabled by default. Users must explicitly enable it
+to donate spare CPU/GPU resources for self-improvement.
 
 Branch policy:
 - main: experimental changes, concurrent contributors welcome
-- stable: tested improvements only, max 1 push per 2 days
+- stable: tested improvements only, max 1 push per 2 days (maintainer only)
 
 Designed to handle concurrent usage: uses file-based locking and
 pull-before-push to avoid conflicts.
@@ -19,12 +28,14 @@ pull-before-push to avoid conflicts.
 from __future__ import annotations
 
 import json
+import shutil
 import subprocess
 import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from forge.agents.qa import QAAgent
 from forge.community.ideas import IdeaCollector, Idea
 from forge.llm.client import OllamaClient
 from forge.utils.logging import get_logger
@@ -33,6 +44,9 @@ log = get_logger("community.self_improve")
 
 # Stable branch: max 1 push per 2 days (172800 seconds)
 STABLE_PUSH_COOLDOWN = 2 * 24 * 3600
+
+# Upstream repo for PRs (community contributors fork from this)
+UPSTREAM_REPO = "hariravichandran/ollama-forge"
 
 
 @dataclass
@@ -46,15 +60,25 @@ class ImprovementResult:
     tests_passed: bool
     committed: bool
     commit_hash: str = ""
+    pr_url: str = ""
 
 
 class SelfImproveAgent:
     """Iterates on ollama-forge, evaluating ideas and proposing improvements.
 
-    Safe for concurrent usage:
-    - Always pulls before committing (rebase)
-    - Uses file-based state to track stable branch push history
-    - Commits only to main, promotes to stable on schedule
+    Two modes of operation:
+
+    **Contributor mode** (default):
+    - Creates a feature branch locally
+    - Commits changes to the feature branch
+    - Uses `gh pr create` to submit a PR to the upstream repo
+    - Does NOT have direct push access to main or stable
+    - Requires `gh` CLI to be installed and authenticated
+
+    **Maintainer mode** (opt-in via config):
+    - Pushes directly to main branch
+    - Can promote tested changes to stable branch (max 1 per 2 days)
+    - Only for the repo owner (hariravichandran) and their AI agents
 
     The improvement loop:
     1. Pull latest from main
@@ -62,8 +86,8 @@ class SelfImproveAgent:
     3. Evaluate which ideas are feasible and beneficial
     4. Implement the most promising improvement
     5. Run tests
-    6. If tests pass, commit to main
-    7. If enough time since last stable push, promote to stable
+    6. If tests pass: create PR (contributor) or push to main (maintainer)
+    7. Maintainer only: maybe promote to stable
     """
 
     def __init__(
@@ -71,18 +95,34 @@ class SelfImproveAgent:
         client: OllamaClient,
         idea_collector: IdeaCollector,
         repo_dir: str = ".",
+        maintainer: bool = False,
     ):
         self.client = client
         self.ideas = idea_collector
         self.repo_dir = Path(repo_dir)
+        self.maintainer = maintainer
+        self.qa = QAAgent(client=client, repo_dir=repo_dir)
         self.state_file = self.repo_dir / ".forge_state" / "self_improve_state.json"
         self.state = self._load_state()
+
+    @property
+    def is_contributor(self) -> bool:
+        """True if running in contributor mode (creates PRs, no direct push)."""
+        return not self.maintainer
 
     def run_iteration(self) -> ImprovementResult | None:
         """Run one improvement iteration.
 
         Returns ImprovementResult if a change was made, None otherwise.
         """
+        # Verify gh CLI is available for contributors
+        if self.is_contributor and not self._gh_available():
+            log.error(
+                "GitHub CLI (gh) is required for contributor mode. "
+                "Install: https://cli.github.com/ then run: gh auth login"
+            )
+            return None
+
         # Step 1: Pull latest
         self._git_pull()
 
@@ -104,16 +144,34 @@ class SelfImproveAgent:
             log.info("Could not generate viable proposal for: %s", best.get("title"))
             return None
 
-        # Step 5: Apply and test
+        # Step 5: For contributors, create a feature branch before applying changes
+        branch_name = None
+        if self.is_contributor:
+            branch_name = self._create_feature_branch(best)
+
+        # Step 6: Apply and test
         result = self._apply_and_test(best, proposal)
 
-        # Step 6: Commit if successful
+        # Step 7: Commit and submit
         if result.success and result.tests_passed:
-            result.committed = self._commit_to_main(result)
+            if self.is_contributor:
+                result.committed, result.pr_url = self._submit_pr(result, branch_name)
+                # Return to main after PR submission
+                self._git_run("checkout", "main")
+            else:
+                result.committed = self._push_to_main(result)
 
-        # Step 7: Maybe promote to stable
-        if result.committed:
+        # Step 8: Maintainer only — maybe promote to stable
+        if result.committed and self.maintainer:
             self._maybe_promote_to_stable()
+
+        # Clean up feature branch on failure
+        if not result.committed and branch_name:
+            try:
+                self._git_run("checkout", "main")
+                self._git_run("branch", "-D", branch_name)
+            except Exception:
+                pass
 
         return result
 
@@ -231,7 +289,16 @@ class SelfImproveAgent:
             return None
 
     def _apply_and_test(self, candidate: dict, proposal: dict) -> ImprovementResult:
-        """Apply proposed changes and run tests."""
+        """Apply proposed changes, run QA validation, and test.
+
+        The QA pipeline:
+        1. Apply the proposed code changes
+        2. Run existing tests (regression check)
+        3. QA agent generates new tests specific to the changes
+        4. Run generated tests to verify new behavior
+        5. QA agent reviews code for common issues
+        6. Rollback everything if any step fails
+        """
         files_changed = []
         idea_id = candidate.get("idea_id", "research")
 
@@ -251,12 +318,47 @@ class SelfImproveAgent:
             except Exception as e:
                 log.error("Failed to apply change to %s: %s", file_path, e)
 
-        # Run tests
-        tests_passed = self._run_tests(proposal.get("tests_to_run", []))
+        if not files_changed:
+            return ImprovementResult(
+                idea_id=idea_id,
+                success=False,
+                description=candidate.get("title", ""),
+                files_changed=[],
+                tests_passed=False,
+                committed=False,
+            )
 
-        # Rollback if tests failed
+        # Get diff for QA context
+        try:
+            diff = self._git_run("diff")
+        except Exception:
+            diff = ""
+
+        # QA validation: existing tests + generated tests + code review
+        qa_result = self.qa.validate_changes(
+            files_changed=files_changed,
+            change_description=candidate.get("title", ""),
+            diff=diff,
+        )
+
+        tests_passed = qa_result.passed
+
+        if not tests_passed:
+            log.warning("QA validation failed: %s", qa_result.summary)
+
+        # Code review (non-blocking but logged)
+        review = self.qa.review_code(files_changed, diff=diff)
+        if review and "LGTM" not in review.upper():
+            log.info("QA review concerns: %s", review[:300])
+            # If review finds security issues or critical bugs, fail the change
+            review_lower = review.lower()
+            if any(w in review_lower for w in ["security", "injection", "hardcoded secret", "critical bug"]):
+                log.warning("QA review flagged critical issue — rolling back")
+                tests_passed = False
+
+        # Rollback if QA failed
         if not tests_passed and files_changed:
-            log.warning("Tests failed, rolling back changes")
+            log.warning("QA failed, rolling back changes")
             self._git_checkout_files(files_changed)
             files_changed = []
 
@@ -289,15 +391,111 @@ class SelfImproveAgent:
                 return False
         return True
 
-    def _commit_to_main(self, result: ImprovementResult) -> bool:
-        """Commit improvement to main branch."""
+    # ─── Contributor mode: fork + PR ─────────────────────────────────────────
+
+    def _gh_available(self) -> bool:
+        """Check if GitHub CLI is installed and authenticated."""
+        if not shutil.which("gh"):
+            return False
+        try:
+            result = subprocess.run(
+                ["gh", "auth", "status"],
+                capture_output=True, text=True, timeout=10,
+            )
+            return result.returncode == 0
+        except Exception:
+            return False
+
+    def _create_feature_branch(self, candidate: dict) -> str:
+        """Create a feature branch for the improvement."""
+        # Generate branch name from candidate title
+        title_slug = candidate.get("title", "improvement")[:40]
+        title_slug = "".join(c if c.isalnum() or c == "-" else "-" for c in title_slug.lower())
+        title_slug = title_slug.strip("-")
+        branch_name = f"self-improve/{title_slug}-{int(time.time()) % 100000}"
+
+        self._git_run("checkout", "-b", branch_name)
+        log.info("Created feature branch: %s", branch_name)
+        return branch_name
+
+    def _submit_pr(self, result: ImprovementResult, branch_name: str | None) -> tuple[bool, str]:
+        """Create a GitHub PR for the improvement (contributor mode).
+
+        Returns (committed, pr_url) tuple.
+        """
+        if not branch_name:
+            return False, ""
+
+        try:
+            # Stage and commit changes
+            for f in result.files_changed:
+                self._git_run("add", f)
+
+            msg = (
+                f"self-improve: {result.description}\n\n"
+                f"Idea: {result.idea_id}\n"
+                f"Files: {', '.join(result.files_changed)}\n\n"
+                f"Generated by ollama-forge self-improvement agent."
+            )
+            self._git_run("commit", "-m", msg)
+
+            # Push the feature branch to the user's fork (origin)
+            self._git_run("push", "-u", "origin", branch_name)
+
+            # Create PR against upstream repo
+            pr_result = subprocess.run(
+                [
+                    "gh", "pr", "create",
+                    "--repo", UPSTREAM_REPO,
+                    "--title", f"self-improve: {result.description[:60]}",
+                    "--body", (
+                        f"## Self-Improvement PR\n\n"
+                        f"**Idea:** {result.idea_id}\n"
+                        f"**Description:** {result.description}\n\n"
+                        f"### Changes\n"
+                        f"{chr(10).join('- ' + f for f in result.files_changed)}\n\n"
+                        f"### Testing\n"
+                        f"- All tests passed locally\n\n"
+                        f"---\n"
+                        f"Generated by ollama-forge self-improvement agent."
+                    ),
+                    "--head", branch_name,
+                ],
+                capture_output=True, text=True, timeout=30,
+                cwd=str(self.repo_dir),
+            )
+
+            if pr_result.returncode == 0:
+                pr_url = pr_result.stdout.strip()
+                log.info("Created PR: %s", pr_url)
+                return True, pr_url
+            else:
+                log.error("Failed to create PR: %s", pr_result.stderr)
+                return False, ""
+
+        except Exception as e:
+            log.error("Failed to submit PR: %s", e)
+            return False, ""
+
+    # ─── Maintainer mode: direct push ────────────────────────────────────────
+
+    def _push_to_main(self, result: ImprovementResult) -> bool:
+        """Commit improvement directly to main branch (maintainer only)."""
+        if not self.maintainer:
+            log.error("Direct push requires maintainer mode")
+            return False
+
         try:
             # Stage changed files
             for f in result.files_changed:
                 self._git_run("add", f)
 
             # Commit
-            msg = f"auto-improve: {result.description}\n\nIdea: {result.idea_id}\nFiles: {', '.join(result.files_changed)}"
+            msg = (
+                f"auto-improve: {result.description}\n\n"
+                f"Idea: {result.idea_id}\n"
+                f"Files: {', '.join(result.files_changed)}"
+            )
             self._git_run("commit", "-m", msg)
 
             # Pull-rebase then push (safe for concurrent usage)
@@ -311,7 +509,13 @@ class SelfImproveAgent:
             return False
 
     def _maybe_promote_to_stable(self) -> bool:
-        """Promote main to stable if cooldown has elapsed (max 1 per 2 days)."""
+        """Promote main to stable if cooldown has elapsed (max 1 per 2 days).
+
+        Maintainer only — contributors cannot promote to stable.
+        """
+        if not self.maintainer:
+            return False
+
         last_stable_push = self.state.get("last_stable_push", 0)
         elapsed = time.time() - last_stable_push
 
@@ -341,6 +545,8 @@ class SelfImproveAgent:
             except Exception:
                 pass
             return False
+
+    # ─── Git helpers ─────────────────────────────────────────────────────────
 
     def _git_pull(self) -> None:
         """Pull latest from origin."""
