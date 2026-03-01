@@ -143,15 +143,41 @@ class BaseAgent:
         return "Max tool rounds reached. Please try a simpler request."
 
     def stream_chat(self, user_message: str):
-        """Stream a response (no tool use — for simple chat)."""
+        """Stream a response, yielding typed event dicts.
+
+        Yields dicts with 'type' key: 'text', 'tool_call', 'done', 'error'.
+        Handles tool calls inline — executes tools and includes results in stream.
+        """
         self.messages.append({"role": "user", "content": user_message})
         compressed = self.compressor.compress(self.messages)
         messages = [{"role": "system", "content": self._system_prompt}] + compressed
+        tools = self.get_tool_definitions()
 
         full_response = []
-        for chunk in self.client.stream_chat(messages):
-            full_response.append(chunk)
-            yield chunk
+        for event in self.client.stream_chat(messages, tools=tools if tools else None):
+            event_type = event.get("type", "")
+
+            if event_type == "text":
+                full_response.append(event.get("content", ""))
+                yield event
+            elif event_type == "tool_call":
+                # Execute tool calls
+                for tc in event.get("tool_calls", []):
+                    func = tc.get("function", {})
+                    func_name = func.get("name", "")
+                    func_args = func.get("arguments", {})
+                    log.info("Stream tool call: %s(%s)", func_name, json.dumps(func_args)[:200])
+                    tool_result = self._execute_tool(func_name, func_args)
+                    yield {"type": "tool_result", "name": func_name, "result": tool_result}
+                yield event
+            elif event_type == "done":
+                yield event
+                break
+            elif event_type == "error":
+                yield event
+                break
+            else:
+                yield event
 
         self.messages.append({"role": "assistant", "content": "".join(full_response)})
 

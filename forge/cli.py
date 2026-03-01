@@ -936,5 +936,152 @@ def undo(directory: str):
         console.print("Cancelled.")
 
 
+# ─── Sessions ──────────────────────────────────────────────────────────────
+
+
+@main.group(invoke_without_command=True)
+@click.pass_context
+def session(ctx):
+    """Manage saved chat sessions — list, export, delete."""
+    if ctx.invoked_subcommand is None:
+        ctx.invoke(session_list)
+
+
+@session.command("list")
+@click.option("--limit", "-n", default=20, help="Maximum sessions to show")
+def session_list(limit: int):
+    """List saved chat sessions."""
+    from forge.agents.sessions import SessionManager
+
+    mgr = SessionManager()
+    sessions = mgr.list_sessions(limit=limit)
+
+    if not sessions:
+        console.print("No saved sessions. Start a chat with 'forge chat' to create one.")
+        return
+
+    table = Table(title="Saved Sessions")
+    table.add_column("ID", style="cyan", width=12)
+    table.add_column("Title")
+    table.add_column("Agent", style="green")
+    table.add_column("Messages", justify="right")
+    table.add_column("Model", style="dim")
+
+    for s in sessions:
+        table.add_row(
+            s.session_id[:12],
+            s.title[:50],
+            s.agent_name,
+            str(s.message_count),
+            s.model,
+        )
+    console.print(table)
+
+
+@session.command("export")
+@click.argument("session_id")
+@click.option("--format", "-f", "fmt", default="markdown", type=click.Choice(["markdown", "json"]))
+@click.option("--output", "-o", default="", help="Output file (default: stdout)")
+def session_export(session_id: str, fmt: str, output: str):
+    """Export a chat session to markdown or JSON."""
+    from forge.agents.sessions import SessionManager
+
+    mgr = SessionManager()
+    result = mgr.export(session_id, format=fmt)
+
+    if output:
+        from pathlib import Path
+        Path(output).write_text(result)
+        console.print(f"[green]Exported to {output}[/green]")
+    else:
+        console.print(result)
+
+
+@session.command("delete")
+@click.argument("session_id")
+def session_delete(session_id: str):
+    """Delete a saved session."""
+    from forge.agents.sessions import SessionManager
+
+    mgr = SessionManager()
+    if mgr.delete(session_id):
+        console.print(f"[green]Deleted session {session_id}[/green]")
+    else:
+        console.print(f"[red]Session not found: {session_id}[/red]")
+
+
+# ─── Compare ──────────────────────────────────────────────────────────────
+
+
+@main.command()
+@click.argument("prompt")
+@click.option("--models", "-m", multiple=True, help="Models to compare (at least 2)")
+@click.option("--temperature", "-t", default=0.7, help="Temperature for generation")
+def compare(prompt: str, models: tuple, temperature: float):
+    """Compare responses from multiple models side by side.
+
+    \b
+    Example:
+        forge compare "Explain recursion" -m qwen2.5-coder:3b -m qwen2.5-coder:7b
+    """
+    from forge.llm.client import OllamaClient
+
+    if len(models) < 2:
+        console.print("Provide at least 2 models with -m. Example:")
+        console.print("  forge compare \"Hello\" -m qwen2.5-coder:3b -m qwen2.5-coder:7b")
+        return
+
+    client = OllamaClient()
+    if not client.is_available():
+        console.print("[red]Ollama is not running.[/red]")
+        return
+
+    results = []
+    for model_name in models:
+        console.print(f"\n[dim]Querying {model_name}...[/dim]")
+        client.switch_model(model_name)
+        import time
+        start = time.time()
+        result = client.generate(prompt, temperature=temperature, timeout=120)
+        elapsed = time.time() - start
+
+        response = result.get("response", "")
+        tokens = result.get("tokens", 0)
+        tps = tokens / max(0.01, elapsed)
+        results.append({
+            "model": model_name,
+            "response": response,
+            "tokens": tokens,
+            "time_s": round(elapsed, 1),
+            "tps": round(tps, 1),
+        })
+
+    # Display results
+    for r in results:
+        console.print(Panel(
+            r["response"][:2000],
+            title=f"[cyan]{r['model']}[/cyan] — {r['tokens']} tokens in {r['time_s']}s ({r['tps']} tok/s)",
+            border_style="blue",
+        ))
+
+    # Summary table
+    table = Table(title="Comparison Summary")
+    table.add_column("Model", style="cyan")
+    table.add_column("Tokens", justify="right")
+    table.add_column("Time", justify="right")
+    table.add_column("Speed", justify="right")
+    table.add_column("Response Length", justify="right")
+
+    for r in results:
+        table.add_row(
+            r["model"],
+            str(r["tokens"]),
+            f"{r['time_s']}s",
+            f"{r['tps']} tok/s",
+            str(len(r["response"])),
+        )
+    console.print(table)
+
+
 if __name__ == "__main__":
     main()

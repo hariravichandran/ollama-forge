@@ -1438,3 +1438,59 @@ class TestSessionManager:
         assert "session-" in summary
         assert "Test Session" in summary
         assert "coder" in summary
+
+
+class TestBaseAgentStreaming:
+    """Tests for the improved stream_chat with tool support."""
+
+    def test_stream_chat_yields_events(self):
+        """stream_chat should yield typed event dicts."""
+        client = MockOllamaClient()
+        agent = BaseAgent(client=client, config=AgentConfig(tools=[]))
+        events = list(agent.stream_chat("Hello"))
+        text_events = [e for e in events if e.get("type") == "text"]
+        done_events = [e for e in events if e.get("type") == "done"]
+        assert len(text_events) >= 1
+        assert len(done_events) == 1
+
+    def test_stream_chat_accumulates_response(self):
+        """stream_chat should save the full response in message history."""
+        client = MockOllamaClient()
+        agent = BaseAgent(client=client, config=AgentConfig(tools=[]))
+        _ = list(agent.stream_chat("Hello"))
+        assert len(agent.messages) == 2  # user + assistant
+        assert agent.messages[1]["role"] == "assistant"
+
+    def test_stream_chat_handles_errors(self):
+        """stream_chat should handle error events gracefully."""
+        class ErrorStreamClient(MockOllamaClient):
+            def stream_chat(self, messages, system="", tools=None, images=None, timeout=300, model=None):
+                yield {"type": "error", "error": "Test error"}
+        client = ErrorStreamClient()
+        agent = BaseAgent(client=client, config=AgentConfig(tools=[]))
+        events = list(agent.stream_chat("Hello"))
+        error_events = [e for e in events if e.get("type") == "error"]
+        assert len(error_events) == 1
+
+
+class TestCLISessionCommands:
+    """Tests for CLI session management commands."""
+
+    def test_session_manager_importable(self):
+        """SessionManager should be importable for CLI use."""
+        from forge.agents.sessions import SessionManager
+        mgr = SessionManager()
+        assert hasattr(mgr, "list_sessions")
+        assert hasattr(mgr, "export")
+        assert hasattr(mgr, "delete")
+
+    def test_session_export_formats(self):
+        """export() should support markdown and json formats."""
+        from forge.agents.sessions import SessionManager
+        mgr = SessionManager()
+        # Export nonexistent session should handle gracefully
+        result = mgr.export("nonexistent-session", format="markdown")
+        assert "not found" in result.lower()
+
+        result = mgr.export("nonexistent-session", format="json")
+        assert "not found" in result.lower()
