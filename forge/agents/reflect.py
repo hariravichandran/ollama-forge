@@ -78,20 +78,24 @@ class ReflectiveAgent(BaseAgent):
     def chat(self, user_message: str) -> str:
         """Chat with self-reflection on the response."""
         # Generate initial response
-        initial_response = super().chat(user_message)
+        response = super().chat(user_message)
 
         # Don't review very short responses or error messages
-        if len(initial_response) < 30 or initial_response.startswith("LLM error:"):
-            return initial_response
+        if len(response) < 30 or response.startswith("LLM error:"):
+            return response
 
-        # Review and potentially revise
-        final_response = self._review_and_revise(user_message, initial_response)
-        if final_response != initial_response:
-            # Update the stored message with the revised version
-            if self.messages and self.messages[-1]["role"] == "assistant":
-                self.messages[-1]["content"] = final_response
+        # Review and potentially revise (up to max_revisions times)
+        for _ in range(self.max_revisions):
+            revised = self._review_and_revise(user_message, response)
+            if revised == response:
+                break  # Reviewer approved, no more changes needed
+            response = revised
 
-        return final_response
+        # Update the stored message with the final version
+        if self.messages and self.messages[-1]["role"] == "assistant":
+            self.messages[-1]["content"] = response
+
+        return response
 
     def _review_and_revise(self, question: str, response: str) -> str:
         """Review a response and revise if needed."""

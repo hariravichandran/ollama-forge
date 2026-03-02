@@ -402,44 +402,50 @@ class OllamaClient:
         if tools:
             payload["tools"] = tools
 
-        start = time.time()
-        total_tokens = 0
-        try:
-            r = requests.post(
-                f"{self.base_url}/api/chat",
-                json=payload,
-                stream=True,
-                timeout=timeout,
-            )
-            for line in r.iter_lines():
-                if line:
-                    data = json.loads(line)
-                    msg = data.get("message", {})
+        for attempt in range(1 + self.max_retries):
+            start = time.time()
+            try:
+                r = requests.post(
+                    f"{self.base_url}/api/chat",
+                    json=payload,
+                    stream=True,
+                    timeout=timeout,
+                )
+                for line in r.iter_lines():
+                    if line:
+                        data = json.loads(line)
+                        msg = data.get("message", {})
 
-                    # Text content
-                    content = msg.get("content", "")
-                    if content:
-                        yield {"type": "text", "content": content}
+                        # Text content
+                        content = msg.get("content", "")
+                        if content:
+                            yield {"type": "text", "content": content}
 
-                    # Tool calls
-                    if msg.get("tool_calls"):
-                        yield {"type": "tool_call", "tool_calls": msg["tool_calls"]}
+                        # Tool calls
+                        if msg.get("tool_calls"):
+                            yield {"type": "tool_call", "tool_calls": msg["tool_calls"]}
 
-                    # Done signal
-                    if data.get("done"):
-                        total_tokens = data.get("eval_count", 0)
-                        elapsed = time.time() - start
-                        self.stats.total_calls += 1
-                        self.stats.total_tokens += total_tokens
-                        self.stats.total_time_s += elapsed
-                        yield {
-                            "type": "done",
-                            "tokens": total_tokens,
-                            "time_s": round(elapsed, 2),
-                            "tokens_per_sec": round(total_tokens / max(0.01, elapsed), 1),
-                        }
-        except (requests.ConnectionError, requests.Timeout) as e:
-            yield {"type": "error", "error": str(e)}
+                        # Done signal
+                        if data.get("done"):
+                            total_tokens = data.get("eval_count", 0)
+                            elapsed = time.time() - start
+                            self.stats.total_calls += 1
+                            self.stats.total_tokens += total_tokens
+                            self.stats.total_time_s += elapsed
+                            yield {
+                                "type": "done",
+                                "tokens": total_tokens,
+                                "time_s": round(elapsed, 2),
+                                "tokens_per_sec": round(total_tokens / max(0.01, elapsed), 1),
+                            }
+                return  # Stream completed successfully
+            except (requests.ConnectionError, requests.Timeout, OSError) as e:
+                self.stats.errors += 1
+                if attempt < self.max_retries:
+                    log.warning("Stream chat error (attempt %d), retrying: %s", attempt + 1, e)
+                    time.sleep(1)
+                    continue
+                yield {"type": "error", "error": str(e)}
 
     def show_model(self, model: str | None = None) -> dict[str, Any]:
         """Get model details (parameters, template, capabilities).
