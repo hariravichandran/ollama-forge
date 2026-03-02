@@ -154,6 +154,7 @@ class BaseAgent:
         tools = self.get_tool_definitions()
 
         full_response = []
+        tool_results = []
         for event in self.client.stream_chat(messages, tools=tools if tools else None):
             event_type = event.get("type", "")
 
@@ -168,6 +169,7 @@ class BaseAgent:
                     func_args = func.get("arguments", {})
                     log.info("Stream tool call: %s(%s)", func_name, json.dumps(func_args)[:200])
                     tool_result = self._execute_tool(func_name, func_args)
+                    tool_results.append({"name": func_name, "result": tool_result})
                     yield {"type": "tool_result", "name": func_name, "result": tool_result}
                 yield event
             elif event_type == "done":
@@ -179,6 +181,9 @@ class BaseAgent:
             else:
                 yield event
 
+        # Store tool results in conversation history so they persist across turns
+        for tr in tool_results:
+            self.messages.append({"role": "tool", "content": tr["result"]})
         self.messages.append({"role": "assistant", "content": "".join(full_response)})
 
     def _execute_tool(self, function_name: str, args: dict[str, Any]) -> str:

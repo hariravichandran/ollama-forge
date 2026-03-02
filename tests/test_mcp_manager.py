@@ -75,6 +75,101 @@ class TestNaturalLanguage:
         assert result["action"] is None
 
 
+class TestMCPManager:
+    """Tests for the MCP manager lifecycle."""
+
+    def test_init_creates_web_search_config(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config_path = Path(tmpdir) / "mcp.yaml"
+            from forge.mcp.manager import MCPManager
+            mgr = MCPManager(config_path=str(config_path))
+            assert "web-search" in mgr._config
+            assert mgr._config["web-search"]["enabled"] is True
+
+    def test_list_available(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config_path = Path(tmpdir) / "mcp.yaml"
+            from forge.mcp.manager import MCPManager
+            mgr = MCPManager(config_path=str(config_path))
+            available = mgr.list_available()
+            assert len(available) >= 5
+            names = [a["name"] for a in available]
+            assert "web-search" in names
+
+    def test_web_search_enabled_by_default(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config_path = Path(tmpdir) / "mcp.yaml"
+            from forge.mcp.manager import MCPManager
+            mgr = MCPManager(config_path=str(config_path))
+            enabled = mgr.get_enabled()
+            assert "web-search" in enabled
+
+    def test_disable_mcp(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config_path = Path(tmpdir) / "mcp.yaml"
+            from forge.mcp.manager import MCPManager
+            mgr = MCPManager(config_path=str(config_path))
+            result = mgr.disable("web-search")
+            assert "disabled" in result.lower()
+            assert "web-search" not in mgr.get_enabled()
+
+    def test_enable_unknown_mcp(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config_path = Path(tmpdir) / "mcp.yaml"
+            from forge.mcp.manager import MCPManager
+            mgr = MCPManager(config_path=str(config_path))
+            result = mgr.enable("totally-fake-mcp")
+            assert "Unknown" in result
+
+    def test_disable_not_enabled(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config_path = Path(tmpdir) / "mcp.yaml"
+            from forge.mcp.manager import MCPManager
+            mgr = MCPManager(config_path=str(config_path))
+            result = mgr.disable("github")
+            assert "was not enabled" in result
+
+    def test_get_tools_for_agent_web_search(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config_path = Path(tmpdir) / "mcp.yaml"
+            from forge.mcp.manager import MCPManager
+            mgr = MCPManager(config_path=str(config_path))
+            tools = mgr.get_tools_for_agent()
+            assert len(tools) >= 1
+            tool_names = [t["function"]["name"] for t in tools]
+            assert "web_search" in tool_names
+
+    def test_get_tools_empty_when_disabled(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config_path = Path(tmpdir) / "mcp.yaml"
+            from forge.mcp.manager import MCPManager
+            mgr = MCPManager(config_path=str(config_path))
+            mgr.disable("web-search")
+            tools = mgr.get_tools_for_agent()
+            assert len(tools) == 0
+
+    def test_config_persists(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config_path = Path(tmpdir) / "mcp.yaml"
+            from forge.mcp.manager import MCPManager
+            mgr = MCPManager(config_path=str(config_path))
+            mgr.disable("web-search")
+
+            # Reload
+            mgr2 = MCPManager(config_path=str(config_path))
+            assert "web-search" not in mgr2.get_enabled()
+
+    def test_list_available_status(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config_path = Path(tmpdir) / "mcp.yaml"
+            from forge.mcp.manager import MCPManager
+            mgr = MCPManager(config_path=str(config_path))
+            available = mgr.list_available()
+            ws = [a for a in available if a["name"] == "web-search"][0]
+            assert ws["status"] == "enabled"
+            assert ws["builtin"] is True
+
+
 class TestWebSearchMCP:
     """Tests for the built-in web search MCP."""
 
