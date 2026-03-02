@@ -12,11 +12,13 @@ Index storage: .forge/index/ in the project root (gitignored).
 
 from __future__ import annotations
 
+import fnmatch as fnm
 import hashlib
 import json
 import os
 import re
 import time
+from collections import Counter
 from dataclasses import dataclass, field, asdict
 from pathlib import Path
 from typing import Any, TYPE_CHECKING
@@ -114,6 +116,7 @@ class CodebaseIndexer:
         self._file_index: dict[str, FileIndex] = {}
         self._symbol_index: dict[str, list[Symbol]] = {}  # name -> symbols
         self._loaded = False
+        self._gitignore_cache: list[str] | None = None  # cached gitignore patterns
 
     def build_index(self, generate_summaries: bool = False) -> dict[str, Any]:
         """Build the full codebase index from scratch.
@@ -321,9 +324,7 @@ class CodebaseIndexer:
         lines.append("")
 
         # Language breakdown
-        lang_counts: dict[str, int] = {}
-        for entry in self._file_index.values():
-            lang_counts[entry.language] = lang_counts.get(entry.language, 0) + 1
+        lang_counts = Counter(entry.language for entry in self._file_index.values())
         if lang_counts:
             lang_str = ", ".join(f"{lang}: {count}" for lang, count in
                                  sorted(lang_counts.items(), key=lambda x: -x[1])[:5])
@@ -383,16 +384,20 @@ class CodebaseIndexer:
         return files
 
     def _load_gitignore(self) -> list[str]:
-        """Load .gitignore patterns if present."""
+        """Load .gitignore patterns if present (cached after first call)."""
+        if self._gitignore_cache is not None:
+            return self._gitignore_cache
         gitignore = self.project_dir / ".gitignore"
         if not gitignore.exists():
-            return []
+            self._gitignore_cache = []
+            return self._gitignore_cache
         patterns = []
         for line in gitignore.read_text().splitlines():
             line = line.strip()
             if line and not line.startswith("#"):
                 patterns.append(line)
-        return patterns
+        self._gitignore_cache = patterns
+        return self._gitignore_cache
 
     def _matches_gitignore(self, path: str, patterns: list[str]) -> bool:
         """Check if a path matches any gitignore pattern (simplified)."""
@@ -401,12 +406,8 @@ class CodebaseIndexer:
             # Simple matching: exact name, or fnmatch
             if pattern.rstrip("/") in rel.split(os.sep):
                 return True
-            try:
-                import fnmatch as fnm
-                if fnm.fnmatch(rel, pattern) or fnm.fnmatch(Path(rel).name, pattern):
-                    return True
-            except Exception:
-                pass
+            if fnm.fnmatch(rel, pattern) or fnm.fnmatch(Path(rel).name, pattern):
+                return True
         return False
 
     # --- File indexing ---

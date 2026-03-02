@@ -224,3 +224,31 @@ class TestCPUOnlyMode:
         gpu = GPUInfo(vendor="none", name="CPU only", driver="cpu")
         env_vars = configure_rocm_env(gpu)
         assert len(env_vars) == 0  # no env vars set
+
+
+class TestHardwareCache:
+    """Tests for hardware detection caching."""
+
+    def test_cache_returns_same_object(self):
+        """Cached detection should return the same object."""
+        from forge.hardware import detect as detect_mod
+        detect_mod._hardware_cache = None  # clear cache
+        hw1 = detect_hardware()
+        hw2 = detect_hardware()
+        assert hw1 is hw2  # same object from cache
+
+    def test_force_redetect(self):
+        """use_cache=False should force re-detection."""
+        from forge.hardware import detect as detect_mod
+        detect_mod._hardware_cache = None  # clear cache
+        hw1 = detect_hardware()
+        hw2 = detect_hardware(use_cache=False)
+        # Not the same object (re-detected)
+        assert hw1 is not hw2
+
+    def test_cache_survives_multiple_calls(self):
+        """Multiple calls should all use cache."""
+        from forge.hardware import detect as detect_mod
+        detect_mod._hardware_cache = None  # clear cache
+        results = [detect_hardware() for _ in range(5)]
+        assert all(r is results[0] for r in results)

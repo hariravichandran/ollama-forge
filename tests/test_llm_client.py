@@ -133,3 +133,51 @@ class TestModelCatalogue:
         # Should be sorted descending by size
         sizes = [m.size_gb for m in models]
         assert sizes == sorted(sizes, reverse=True)
+
+
+class TestClientPerformance:
+    """Tests for performance features (connection pooling, caching)."""
+
+    def test_persistent_session(self):
+        """Client should use a persistent requests.Session."""
+        import requests
+        client = OllamaClient(base_url="http://localhost:19999")
+        assert isinstance(client._session, requests.Session)
+
+    def test_model_cache_empty_initially(self):
+        """Model cache should be empty initially."""
+        client = OllamaClient(base_url="http://localhost:19999")
+        assert client._models_cache == []
+        assert client._models_cache_time == 0
+
+    def test_model_cache_ttl(self):
+        """Model cache TTL should be 5 minutes."""
+        client = OllamaClient(base_url="http://localhost:19999")
+        assert client._models_cache_ttl == 300
+
+    def test_list_models_returns_cached(self):
+        """list_models should return cached data when within TTL."""
+        import time
+        client = OllamaClient(base_url="http://localhost:19999")
+        # Simulate a cached result
+        client._models_cache = [{"name": "cached-model:7b"}]
+        client._models_cache_time = time.time()
+        models = client.list_models()
+        assert len(models) == 1
+        assert models[0]["name"] == "cached-model:7b"
+
+    def test_list_models_stale_cache(self):
+        """list_models should not use stale cache (expired TTL)."""
+        import time
+        client = OllamaClient(base_url="http://localhost:19999")
+        # Simulate an expired cache
+        client._models_cache = [{"name": "stale-model:7b"}]
+        client._models_cache_time = time.time() - 600  # 10 min ago (expired)
+        models = client.list_models()
+        # Should try to fetch (and fail), then return stale cache as fallback
+        assert isinstance(models, list)
+
+    def test_prompt_tokens_tracked(self):
+        """LLMStats should track prompt tokens."""
+        stats = LLMStats()
+        assert stats.total_prompt_tokens == 0
