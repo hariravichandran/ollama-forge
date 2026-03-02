@@ -103,10 +103,14 @@ class MCPManager:
         """Get all tool definitions from enabled MCPs."""
         tools = []
 
-        # Web search tools (always available if enabled)
-        if self._config.get("web-search", {}).get("enabled", True):
-            tools.extend([
-                {
+        for name in self.get_enabled():
+            entry = MCP_REGISTRY.get(name)
+            if not entry:
+                continue
+
+            if name == "web-search":
+                # Built-in web search
+                tools.append({
                     "type": "function",
                     "function": {
                         "name": "web_search",
@@ -119,8 +123,24 @@ class MCPManager:
                             "required": ["query"],
                         },
                     },
-                },
-            ])
+                })
+            else:
+                # External MCP — expose a generic tool using the MCP name
+                tools.append({
+                    "type": "function",
+                    "function": {
+                        "name": f"mcp_{name.replace('-', '_')}",
+                        "description": entry.description,
+                        "parameters": {
+                            "type": "object",
+                            "properties": {
+                                "action": {"type": "string", "description": "Action to perform"},
+                                "params": {"type": "string", "description": "Parameters as JSON string"},
+                            },
+                            "required": ["action"],
+                        },
+                    },
+                })
 
         return tools
 
