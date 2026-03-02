@@ -16,6 +16,7 @@ introduced by the change.
 
 from __future__ import annotations
 
+import os
 import subprocess
 import tempfile
 import textwrap
@@ -222,8 +223,10 @@ class QAAgent:
         Returns (passed, output) tuple.
         """
         try:
-            # Write to a temporary file in the tests/ directory
-            test_file = self.repo_dir / "tests" / "_qa_generated_test.py"
+            # Write to a temporary file outside the project tree
+            fd, tmp_path = tempfile.mkstemp(suffix=".py", prefix="forge_qa_test_")
+            test_file = Path(tmp_path)
+            os.close(fd)
             test_file.write_text(test_code)
 
             try:

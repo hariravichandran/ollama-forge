@@ -231,9 +231,10 @@ class FilesystemTool:
     def _list_files(self, pattern: str) -> str:
         matches = sorted(self.working_dir.glob(pattern))
         # Limit results
-        if len(matches) > 100:
+        total = len(matches)
+        if total > 100:
             matches = matches[:100]
-            suffix = f"\n... and {len(matches) - 100} more"
+            suffix = f"\n... and {total - 100} more"
         else:
             suffix = ""
 

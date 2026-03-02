@@ -80,6 +80,15 @@ class TestFilesystemTool:
             assert "b.py" in result
             assert "c.txt" not in result
 
+    def test_list_files_over_limit(self):
+        """When >100 files match, the suffix should show the correct overflow count."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            for i in range(105):
+                (Path(tmpdir) / f"file_{i:03d}.txt").write_text(f"# {i}")
+            tool = FilesystemTool(working_dir=tmpdir)
+            result = tool.execute("list_files", {"pattern": "*.txt"})
+            assert "5 more" in result
+
     def test_search_files(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             (Path(tmpdir) / "test.py").write_text("def hello():\n    return 42\n")

@@ -179,6 +179,23 @@ def chat(model: str, agent: str, working_dir: str, cascade: bool, auto_approve: 
             else:
                 console.print("[dim]Nothing to save.[/dim]")
             continue
+        elif user_input.startswith("/load"):
+            from forge.agents.sessions import SessionManager
+            parts = user_input.split(maxsplit=1)
+            if len(parts) < 2 or not parts[1].strip():
+                console.print("[yellow]Usage: /load <session-id>[/yellow]")
+                continue
+            session_id = parts[1].strip()
+            mgr = SessionManager()
+            session = mgr.load(session_id)
+            if session:
+                current = orchestrator.agents.get(orchestrator.active_agent)
+                if current:
+                    current.messages = list(session.messages)
+                console.print(f"[green]Loaded session {session.id[:8]} ({len(session.messages)} messages)[/green]")
+            else:
+                console.print(f"[red]Session not found: {session_id}[/red]")
+            continue
         elif user_input == "/help":
             console.print(
                 "[bold]Chat Commands:[/bold]\n"
@@ -187,6 +204,7 @@ def chat(model: str, agent: str, working_dir: str, cascade: bool, auto_approve: 
                 "  /model <name>  — Switch to a different model\n"
                 "  /history       — Show recent conversation messages\n"
                 "  /save          — Save current session to disk\n"
+                "  /load <id>     — Load a saved session\n"
                 "  /stats         — Show usage statistics\n"
                 "  /remember <f>  — Store a fact in memory\n"
                 "  /forget        — Clear all stored facts\n"
