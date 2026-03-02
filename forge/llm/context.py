@@ -104,16 +104,23 @@ class ContextCompressor:
         if split_idx > self._summarized_up_to:
             old_text = self._format_messages(old_messages)
 
+            # Extract code blocks before summarization to preserve them
+            code_blocks = self._extract_code_blocks(old_text)
+
             # Include previous summary if it exists
             if self._summary_cache:
                 old_text = f"Previous summary:\n{self._summary_cache}\n\nNew messages to incorporate:\n{old_text}"
 
             summary = self._ask_for_summary(old_text)
             if summary:
+                # Re-inject code blocks that may have been lost
+                if code_blocks:
+                    preserved = "\n\n".join(code_blocks[:5])  # Keep up to 5 most recent
+                    summary = f"{summary}\n\n[Preserved code blocks]\n{preserved}"
                 self._summary_cache = summary
                 self._summarized_up_to = split_idx
-                log.info("Compressed %d messages into summary (%d chars)",
-                         len(old_messages), len(summary))
+                log.info("Compressed %d messages into summary (%d chars, %d code blocks preserved)",
+                         len(old_messages), len(summary), len(code_blocks))
 
         # Build result: system messages + summary + recent
         result = list(system_msgs)
@@ -198,6 +205,15 @@ class ContextCompressor:
             content = msg.get("content", "")
             lines.append(f"[{role}]: {content}")
         return "\n\n".join(lines)
+
+    @staticmethod
+    def _extract_code_blocks(text: str) -> list[str]:
+        """Extract fenced code blocks from text.
+
+        Returns a list of code blocks (including the ``` fences) so they can
+        be re-injected after summarization to prevent the LLM from mangling them.
+        """
+        return re.findall(r"```[\s\S]*?```", text)
 
     def reset(self) -> None:
         """Clear cached summaries (e.g., for a new conversation)."""

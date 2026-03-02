@@ -310,43 +310,61 @@ class OllamaClient:
         elif json_mode:
             payload["format"] = "json"
 
-        start = time.time()
-        try:
-            r = requests.post(
-                f"{self.base_url}/api/chat",
-                json=payload,
-                timeout=timeout,
-            )
-            elapsed = time.time() - start
+        last_error = ""
+        for attempt in range(1 + self.max_retries):
+            start = time.time()
+            try:
+                r = requests.post(
+                    f"{self.base_url}/api/chat",
+                    json=payload,
+                    timeout=timeout,
+                )
+                elapsed = time.time() - start
 
-            if r.status_code != 200:
+                if r.status_code != 200:
+                    self.stats.errors += 1
+                    last_error = r.text
+                    if attempt < self.max_retries:
+                        log.warning("Chat failed (attempt %d), retrying: %s", attempt + 1, r.text[:100])
+                        time.sleep(1)
+                        continue
+                    return {"response": "", "tokens": 0, "time_s": elapsed, "error": r.text}
+
+                data = r.json()
+                msg = data.get("message", {})
+                tokens = data.get("eval_count", 0)
+
+                self.stats.total_calls += 1
+                self.stats.total_tokens += tokens
+                self.stats.total_time_s += elapsed
+
+                result: dict[str, Any] = {
+                    "response": msg.get("content", ""),
+                    "tokens": tokens,
+                    "time_s": elapsed,
+                    "tokens_per_sec": tokens / max(0.01, elapsed),
+                }
+                if msg.get("tool_calls"):
+                    result["tool_calls"] = msg["tool_calls"]
+
+                return result
+            except requests.Timeout:
                 self.stats.errors += 1
-                return {"response": "", "tokens": 0, "time_s": elapsed, "error": r.text}
+                last_error = "timeout"
+                if attempt < self.max_retries:
+                    log.warning("Chat timed out (attempt %d), retrying", attempt + 1)
+                    continue
+                return {"response": "", "tokens": 0, "time_s": time.time() - start, "error": "timeout"}
+            except (requests.ConnectionError, requests.exceptions.RequestException, OSError) as e:
+                self.stats.errors += 1
+                last_error = str(e)
+                if attempt < self.max_retries:
+                    log.warning("Chat error (attempt %d), retrying: %s", attempt + 1, e)
+                    time.sleep(1)
+                    continue
+                return {"response": "", "tokens": 0, "time_s": 0, "error": str(e)}
 
-            data = r.json()
-            msg = data.get("message", {})
-            tokens = data.get("eval_count", 0)
-
-            self.stats.total_calls += 1
-            self.stats.total_tokens += tokens
-            self.stats.total_time_s += elapsed
-
-            result: dict[str, Any] = {
-                "response": msg.get("content", ""),
-                "tokens": tokens,
-                "time_s": elapsed,
-                "tokens_per_sec": tokens / max(0.01, elapsed),
-            }
-            if msg.get("tool_calls"):
-                result["tool_calls"] = msg["tool_calls"]
-
-            return result
-        except requests.Timeout:
-            self.stats.errors += 1
-            return {"response": "", "tokens": 0, "time_s": time.time() - start, "error": "timeout"}
-        except (requests.ConnectionError, requests.exceptions.RequestException, OSError) as e:
-            self.stats.errors += 1
-            return {"response": "", "tokens": 0, "time_s": 0, "error": str(e)}
+        return {"response": "", "tokens": 0, "time_s": 0, "error": last_error}
 
     def stream_chat(
         self,

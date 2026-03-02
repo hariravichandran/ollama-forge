@@ -96,8 +96,8 @@ def chat(model: str, agent: str, working_dir: str, cascade: bool, auto_approve: 
         f"[bold]ollama-forge[/bold] v0.1.0\n"
         f"Model: [cyan]{model_name}[/cyan]  Agent: [green]{orchestrator.active_agent}[/green]\n"
         f"Hardware: {profile.name} ({hw.gpu.name}){memory_status}\n\n"
-        f"Commands: /agents, /agent <name>, /model <name>, /reset, /stats, /idea,\n"
-        f"          /remember <fact>, /forget, /quit",
+        f"Commands: /agents, /agent <name>, /model <name>, /reset, /stats,\n"
+        f"          /history, /save, /remember <fact>, /forget, /idea, /quit",
         title="Welcome",
         border_style="blue",
     ))
@@ -151,6 +151,49 @@ def chat(model: str, agent: str, working_dir: str, cascade: bool, auto_approve: 
         elif user_input == "/forget":
             memory.clear()
             console.print("[dim]Memory cleared.[/dim]")
+            continue
+        elif user_input == "/history":
+            current = orchestrator.agents.get(orchestrator.active_agent)
+            if current and current.messages:
+                for i, msg in enumerate(current.messages[-20:], 1):
+                    role = msg.get("role", "?")
+                    content = msg.get("content", "")[:120]
+                    if role == "user":
+                        console.print(f"  [blue]{i}. You:[/blue] {content}")
+                    else:
+                        console.print(f"  [green]{i}. Agent:[/green] {content}")
+            else:
+                console.print("[dim]No messages yet.[/dim]")
+            continue
+        elif user_input == "/save":
+            from forge.agents.sessions import SessionManager
+            current = orchestrator.agents.get(orchestrator.active_agent)
+            if current and current.messages:
+                mgr = SessionManager()
+                sid = mgr.save(
+                    messages=current.messages,
+                    agent_name=orchestrator.active_agent,
+                    model=client.model,
+                )
+                console.print(f"[green]Session saved: {sid}[/green]")
+            else:
+                console.print("[dim]Nothing to save.[/dim]")
+            continue
+        elif user_input == "/help":
+            console.print(
+                "[bold]Chat Commands:[/bold]\n"
+                "  /agents        — List available agents\n"
+                "  /agent <name>  — Switch to a different agent\n"
+                "  /model <name>  — Switch to a different model\n"
+                "  /history       — Show recent conversation messages\n"
+                "  /save          — Save current session to disk\n"
+                "  /stats         — Show usage statistics\n"
+                "  /remember <f>  — Store a fact in memory\n"
+                "  /forget        — Clear all stored facts\n"
+                "  /reset         — Clear conversation history\n"
+                "  /idea          — Submit or list community ideas\n"
+                "  /quit          — Exit the chat"
+            )
             continue
         elif user_input.startswith("/idea"):
             _handle_idea_command(user_input, working_dir)
@@ -377,6 +420,77 @@ def models_recommend():
         table.add_row(r["category"], r["model"], r["reason"])
     console.print(table)
     console.print("\nPull a model with: [bold]forge models pull <model>[/bold]")
+
+
+@models.command("info")
+@click.argument("model_name")
+def models_info(model_name: str):
+    """Show detailed information about a model."""
+    from forge.llm.client import OllamaClient
+    from forge.llm.models import estimate_model_size
+
+    client = OllamaClient()
+    if not client.is_available():
+        console.print("[red]Ollama is not running.[/red]")
+        return
+
+    details = client.show_model(model_name)
+    if not details:
+        console.print(f"[red]Model not found: {model_name}[/red]")
+        return
+
+    # Extract info
+    modelfile = details.get("modelfile", "")
+    params = details.get("parameters", "")
+    template = details.get("template", "")
+    model_info = details.get("model_info", {})
+
+    table = Table(title=f"Model: {model_name}")
+    table.add_column("Property", style="cyan")
+    table.add_column("Value")
+
+    # Architecture
+    arch = model_info.get("general.architecture", "unknown")
+    table.add_row("Architecture", arch)
+
+    # Parameter count
+    param_count = model_info.get("general.parameter_count", 0)
+    if param_count:
+        table.add_row("Parameters", f"{param_count / 1e9:.1f}B")
+
+    # Context length
+    ctx_len = model_info.get(f"{arch}.context_length", 0)
+    if ctx_len:
+        table.add_row("Context length", f"{ctx_len:,}")
+
+    # Embedding length
+    embed_len = model_info.get(f"{arch}.embedding_length", 0)
+    if embed_len:
+        table.add_row("Embedding dim", str(embed_len))
+
+    # Quantization
+    quant = details.get("quantization_level", "")
+    if quant:
+        table.add_row("Quantization", quant)
+
+    # Size estimate
+    est = estimate_model_size(model_name)
+    table.add_row("Estimated RAM", f"{est:.1f} GB")
+
+    # System prompt from modelfile
+    if params:
+        table.add_row("Parameters", params[:200])
+
+    console.print(table)
+
+    # Show capabilities
+    caps = []
+    if template and "tools" in template.lower():
+        caps.append("tool calling")
+    if "vision" in model_name.lower() or "llava" in model_name.lower():
+        caps.append("vision")
+    if caps:
+        console.print(f"\n[dim]Capabilities: {', '.join(caps)}[/dim]")
 
 
 @models.command("auto-update")
