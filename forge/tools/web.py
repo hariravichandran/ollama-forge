@@ -25,6 +25,8 @@ class WebTool:
         self.cache_dir.mkdir(parents=True, exist_ok=True)
         self.cache_file = self.cache_dir / "web_search_cache.json"
         self._cache: dict[str, Any] = self._load_cache()
+        # Persistent HTTP session for connection reuse
+        self._http_session: Any = None
 
     def get_tool_definitions(self) -> list[dict[str, Any]]:
         """Return Ollama tool-calling definitions."""
@@ -120,9 +122,10 @@ class WebTool:
 
         try:
             import requests
-            r = requests.get(url, timeout=15, headers={
-                "User-Agent": "ollama-forge/0.1 (local AI assistant)",
-            })
+            if self._http_session is None:
+                self._http_session = requests.Session()
+                self._http_session.headers["User-Agent"] = "ollama-forge/0.1 (local AI assistant)"
+            r = self._http_session.get(url, timeout=15)
             r.raise_for_status()
 
             # Simple HTML to text extraction

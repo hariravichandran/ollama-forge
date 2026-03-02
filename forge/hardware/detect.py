@@ -87,14 +87,27 @@ class HardwareInfo:
         return "\n".join(lines)
 
 
-def detect_hardware() -> HardwareInfo:
-    """Detect GPU, CPU, and RAM. Returns HardwareInfo with all findings."""
+# In-process cache — hardware doesn't change within a single process lifetime
+_hardware_cache: HardwareInfo | None = None
+
+
+def detect_hardware(use_cache: bool = True) -> HardwareInfo:
+    """Detect GPU, CPU, and RAM. Returns HardwareInfo with all findings.
+
+    Results are cached in-process since hardware doesn't change at runtime.
+    Pass use_cache=False to force re-detection.
+    """
+    global _hardware_cache
+    if use_cache and _hardware_cache is not None:
+        return _hardware_cache
+
     info = HardwareInfo()
     info.gpu = _detect_gpu()
     info.cpu = _detect_cpu()
     info.ram_gb = _detect_ram()
     log.debug("Hardware detected: GPU=%s (%.1f GB), CPU=%s (%d threads), RAM=%.1f GB",
               info.gpu.name, info.gpu.total_gb, info.cpu.model, info.cpu.threads, info.ram_gb)
+    _hardware_cache = info
     return info
 
 

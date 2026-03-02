@@ -75,12 +75,17 @@ class BaseAgent:
             if tool_class:
                 self._tools[tool_name] = tool_class(working_dir=working_dir)
 
+        # Cache tool definitions (rebuilt only when tools change)
+        self._cached_tool_defs: list[dict[str, Any]] | None = None
+
     def get_tool_definitions(self) -> list[dict[str, Any]]:
-        """Get all tool definitions for Ollama tool calling."""
-        definitions = []
-        for tool in self._tools.values():
-            definitions.extend(tool.get_tool_definitions())
-        return definitions
+        """Get all tool definitions for Ollama tool calling (cached)."""
+        if self._cached_tool_defs is None:
+            definitions = []
+            for tool in self._tools.values():
+                definitions.extend(tool.get_tool_definitions())
+            self._cached_tool_defs = definitions
+        return self._cached_tool_defs
 
     def chat(self, user_message: str) -> str:
         """Process a user message and return the agent's response.

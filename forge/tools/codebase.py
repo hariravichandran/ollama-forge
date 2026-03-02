@@ -460,22 +460,24 @@ class CodebaseIndexer:
         except Exception:
             return ""
 
+    # Class-level constant: extension → language mapping (avoid recreating per call)
+    _LANG_MAP = {
+        ".py": "python", ".js": "javascript", ".ts": "typescript",
+        ".jsx": "javascript", ".tsx": "typescript",
+        ".go": "go", ".rs": "rust", ".java": "java",
+        ".c": "c", ".cpp": "cpp", ".h": "c", ".hpp": "cpp",
+        ".cs": "csharp", ".rb": "ruby", ".php": "php",
+        ".swift": "swift", ".kt": "kotlin", ".scala": "scala",
+        ".lua": "lua", ".sh": "shell", ".bash": "shell", ".zsh": "shell",
+        ".yaml": "yaml", ".yml": "yaml", ".toml": "toml",
+        ".json": "json", ".md": "markdown",
+        ".html": "html", ".css": "css", ".scss": "scss",
+        ".sql": "sql", ".r": "r", ".R": "r", ".jl": "julia",
+    }
+
     def _detect_language(self, ext: str) -> str:
         """Map file extension to language name."""
-        lang_map = {
-            ".py": "python", ".js": "javascript", ".ts": "typescript",
-            ".jsx": "javascript", ".tsx": "typescript",
-            ".go": "go", ".rs": "rust", ".java": "java",
-            ".c": "c", ".cpp": "cpp", ".h": "c", ".hpp": "cpp",
-            ".cs": "csharp", ".rb": "ruby", ".php": "php",
-            ".swift": "swift", ".kt": "kotlin", ".scala": "scala",
-            ".lua": "lua", ".sh": "shell", ".bash": "shell", ".zsh": "shell",
-            ".yaml": "yaml", ".yml": "yaml", ".toml": "toml",
-            ".json": "json", ".md": "markdown",
-            ".html": "html", ".css": "css", ".scss": "scss",
-            ".sql": "sql", ".r": "r", ".R": "r", ".jl": "julia",
-        }
-        return lang_map.get(ext, "unknown")
+        return self._LANG_MAP.get(ext, "unknown")
 
     # --- Symbol extraction ---
 

@@ -67,11 +67,17 @@ class OllamaClient:
         self.keep_alive = keep_alive  # Keep model in memory between requests
         self.max_retries = max_retries
         self.stats = LLMStats()
+        # Persistent HTTP session for connection pooling
+        self._session = requests.Session()
+        # Model list cache (TTL-based)
+        self._models_cache: list[dict[str, Any]] = []
+        self._models_cache_time: float = 0
+        self._models_cache_ttl: float = 300  # 5 minutes
 
     def is_available(self) -> bool:
         """Check if Ollama server is running."""
         try:
-            r = requests.get(f"{self.base_url}/api/version", timeout=5)
+            r = self._session.get(f"{self.base_url}/api/version", timeout=5)
             return r.status_code == 200
         except (requests.ConnectionError, requests.exceptions.RequestException, OSError):
             return False
@@ -79,7 +85,7 @@ class OllamaClient:
     def get_version(self) -> str:
         """Get Ollama server version."""
         try:
-            r = requests.get(f"{self.base_url}/api/version", timeout=5)
+            r = self._session.get(f"{self.base_url}/api/version", timeout=5)
             if r.status_code == 200:
                 return r.json().get("version", "unknown")
         except requests.ConnectionError:
@@ -87,19 +93,24 @@ class OllamaClient:
         return "unavailable"
 
     def list_models(self) -> list[dict[str, Any]]:
-        """List locally available models."""
+        """List locally available models (cached with 5-minute TTL)."""
+        now = time.time()
+        if self._models_cache and (now - self._models_cache_time) < self._models_cache_ttl:
+            return self._models_cache
         try:
-            r = requests.get(f"{self.base_url}/api/tags", timeout=10)
+            r = self._session.get(f"{self.base_url}/api/tags", timeout=10)
             if r.status_code == 200:
-                return r.json().get("models", [])
+                self._models_cache = r.json().get("models", [])
+                self._models_cache_time = now
+                return self._models_cache
         except requests.ConnectionError:
             log.error("Cannot connect to Ollama at %s", self.base_url)
-        return []
+        return self._models_cache or []
 
     def list_running(self) -> list[dict[str, Any]]:
         """List models currently loaded in memory."""
         try:
-            r = requests.get(f"{self.base_url}/api/ps", timeout=5)
+            r = self._session.get(f"{self.base_url}/api/ps", timeout=5)
             if r.status_code == 200:
                 return r.json().get("models", [])
         except requests.ConnectionError:
@@ -119,7 +130,7 @@ class OllamaClient:
         """
         log.info("Pulling model: %s", model)
         try:
-            r = requests.post(
+            r = self._session.post(
                 f"{self.base_url}/api/pull",
                 json={"name": model, "stream": True},
                 stream=True,
@@ -214,7 +225,7 @@ class OllamaClient:
         for attempt in range(1 + self.max_retries):
             start = time.time()
             try:
-                r = requests.post(
+                r = self._session.post(
                     f"{self.base_url}/api/generate",
                     json=payload,
                     timeout=timeout,
@@ -318,7 +329,7 @@ class OllamaClient:
         for attempt in range(1 + self.max_retries):
             start = time.time()
             try:
-                r = requests.post(
+                r = self._session.post(
                     f"{self.base_url}/api/chat",
                     json=payload,
                     timeout=timeout,
@@ -412,7 +423,7 @@ class OllamaClient:
         for attempt in range(1 + self.max_retries):
             start = time.time()
             try:
-                r = requests.post(
+                r = self._session.post(
                     f"{self.base_url}/api/chat",
                     json=payload,
                     stream=True,
@@ -462,7 +473,7 @@ class OllamaClient:
         Useful for checking if a model supports vision, tools, etc.
         """
         try:
-            r = requests.post(
+            r = self._session.post(
                 f"{self.base_url}/api/show",
                 json={"name": model or self.model},
                 timeout=10,
@@ -490,7 +501,7 @@ class OllamaClient:
             },
         }
         try:
-            r = requests.post(
+            r = self._session.post(
                 f"{self.base_url}/api/generate",
                 json=payload,
                 timeout=60,
