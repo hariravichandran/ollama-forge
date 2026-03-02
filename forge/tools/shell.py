@@ -51,9 +51,13 @@ class ShellTool:
         if not command:
             return "Error: empty command"
 
-        # Safety check: warn about destructive commands
+        # Safety check: block destructive commands
         if self._is_dangerous(command):
             return f"Blocked: '{command}' appears destructive. Use with caution."
+
+        # Safety check: block interactive commands that would hang
+        if self._is_interactive(command):
+            return f"Blocked: '{command}' requires interactive input and would hang. Use a non-interactive alternative."
 
         return self._run(command, timeout)
 
@@ -90,14 +94,45 @@ class ShellTool:
         dangerous_patterns = [
             "rm -rf /",
             "rm -rf ~",
+            "rm -rf /*",
             "mkfs.",
             "dd if=",
             ":(){",  # fork bomb
             "> /dev/sd",
             "chmod -R 777 /",
+            "chmod 000",
             "curl | sh",
             "curl | bash",
             "wget | sh",
+            "wget | bash",
+            "sudo rm",
+            "sudo mkfs",
+            "sudo dd",
+            "sudo chmod",
+            "sudo chown /",
         ]
         cmd_lower = command.lower().strip()
         return any(pattern in cmd_lower for pattern in dangerous_patterns)
+
+    def _is_interactive(self, command: str) -> bool:
+        """Check if a command requires interactive input (would hang)."""
+        # Single-word commands that are interactive
+        interactive_exact = {
+            "top", "htop", "ipython", "irb", "python", "python3", "node",
+        }
+
+        # Prefixes that indicate interactive mode
+        interactive_prefixes = [
+            "git rebase -i",
+            "git add -i",
+            "git add --interactive",
+            "vim ", "nano ", "emacs ", "vi ",
+            "less ", "more ",
+            "python3 -i", "python -i",
+            "ssh ", "telnet ", "ftp ",
+        ]
+
+        cmd_lower = command.lower().strip()
+        if cmd_lower in interactive_exact:
+            return True
+        return any(cmd_lower.startswith(p) for p in interactive_prefixes)

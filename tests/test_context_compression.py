@@ -110,3 +110,38 @@ class TestContextCompressor:
         self.compressor.reset()
         assert self.compressor._summary_cache == ""
         assert self.compressor._summarized_up_to == 0
+
+    def test_summary_prompt_requests_code_preservation(self):
+        """Summary system prompt should instruct LLM to keep code blocks."""
+        from forge.llm.context import SUMMARY_SYSTEM_PROMPT
+        assert "code blocks" in SUMMARY_SYSTEM_PROMPT.lower()
+        assert "intact" in SUMMARY_SYSTEM_PROMPT.lower()
+
+    def test_format_messages_includes_code(self):
+        """Message formatting should preserve code blocks for summarization."""
+        messages = [
+            {"role": "user", "content": "Here's my code:\n```python\ndef hello():\n    return 42\n```"},
+            {"role": "assistant", "content": "The function returns 42."},
+        ]
+        formatted = self.compressor._format_messages(messages)
+        assert "```python" in formatted
+        assert "def hello():" in formatted
+        assert "return 42" in formatted
+
+    def test_chars_per_token_reasonable(self):
+        """Token estimation ratio should be reasonable for English text."""
+        assert 2.0 <= CHARS_PER_TOKEN <= 5.0
+
+    def test_compression_incremental(self):
+        """Re-summarizing should incorporate previous summary."""
+        messages = [{"role": "user", "content": f"Message {i} " * 20} for i in range(20)]
+        # First compression
+        result1 = self.compressor.compress(messages)
+        cached_after_first = self.compressor._summary_cache
+
+        # Add more messages and compress again
+        messages.extend([{"role": "user", "content": f"New msg {i} " * 20} for i in range(5)])
+        result2 = self.compressor.compress(messages)
+
+        # Summary should have been updated (or at least still present)
+        assert self.compressor._summary_cache

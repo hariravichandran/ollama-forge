@@ -89,7 +89,14 @@ class PermissionManager:
         auto_approve_all: bool = False,
         prompt_fn: Callable[[str], bool] | None = None,
     ):
-        self.permissions = permissions or dict(DEFAULT_PERMISSIONS)
+        if permissions is not None:
+            self.permissions = permissions
+        else:
+            # Deep copy to avoid mutating the global defaults
+            self.permissions = {
+                k: ActionPermission(action=v.action, description=v.description, level=v.level, category=v.category)
+                for k, v in DEFAULT_PERMISSIONS.items()
+            }
         self.auto_approve_all = auto_approve_all
         self._session_approvals: set[str] = set()
         self._prompt_fn = prompt_fn or self._default_prompt

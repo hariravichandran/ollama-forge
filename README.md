@@ -227,7 +227,13 @@ Save and resume chat sessions:
 forge chat --session abc12345
 ```
 
-Supports partial ID matching, markdown/JSON export, and auto-generated titles.
+Supports partial ID matching, auto-generated titles, and search:
+
+```bash
+forge session list              # List saved sessions
+forge session search "python"   # Search across all sessions
+forge session export ID -f html # Export as HTML, markdown, or JSON
+```
 
 ### Fill-in-the-Middle (FIM)
 
@@ -271,10 +277,23 @@ Three strategies:
 
 ```bash
 forge models              # List installed models
-forge models pull X       # Pull a new model
+forge models pull X       # Pull a new model (with download progress)
 forge models recommend    # Hardware-specific recommendations
 forge models auto-update  # Update all installed models
 forge models remove X     # Remove a model
+forge benchmark           # Benchmark models on standardized prompts
+forge benchmark -m a -m b # Compare two models side-by-side
+```
+
+### Configuration
+
+```bash
+forge config show         # View current settings
+forge config set KEY VAL  # Change a setting
+forge config reset        # Reset to defaults
+forge config path         # Show config file location
+forge doctor              # Diagnose setup issues
+forge init                # Initialize project for ollama-forge
 ```
 
 ### Community Ideas
@@ -389,10 +408,12 @@ Only the repo owner and their AI agents have direct push access. All community c
 
 ## Documentation
 
-- [MCP Guide](docs/mcp-guide.md) — All 30+ MCPs, configuration, creating custom MCPs
 - [Quick Start](docs/quickstart.md) — 5-minute getting started guide
 - [Hardware Guide](docs/hardware-guide.md) — AMD ROCm setup, troubleshooting
+- [MCP Guide](docs/mcp-guide.md) — All 30+ MCPs, configuration, creating custom MCPs
 - [Architecture](docs/architecture.md) — System architecture overview
+- [Troubleshooting](docs/troubleshooting.md) — Common issues and solutions
+- [Contributing](CONTRIBUTING.md) — How to contribute to ollama-forge
 
 ## License
 

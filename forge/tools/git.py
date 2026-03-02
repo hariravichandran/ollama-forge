@@ -180,6 +180,11 @@ class GitTool:
         return self._run_git("log", "--oneline", f"-{count}")
 
     def _commit(self, message: str, files: list[str] | None = None) -> str:
+        # Check for unresolved merge conflicts before committing
+        conflict_check = self._check_conflicts()
+        if conflict_check:
+            return conflict_check
+
         if files:
             for f in files:
                 self._run_git("add", f)
@@ -189,6 +194,26 @@ class GitTool:
         # Tag agent commits for undo tracking
         full_message = f"{AGENT_COMMIT_TAG} {message}"
         return self._run_git("commit", "-m", full_message)
+
+    def _check_conflicts(self) -> str:
+        """Check for unresolved merge conflicts in tracked files.
+
+        Returns an error message if conflicts found, empty string if clean.
+        """
+        status = self._run_git("status", "--porcelain")
+        if status == "(no output)":
+            return ""
+
+        conflict_files = []
+        for line in status.splitlines():
+            # 'UU', 'AA', 'DD' etc. indicate unmerged files
+            if line[:2] in ("UU", "AA", "DD", "AU", "UA", "DU", "UD"):
+                conflict_files.append(line[3:].strip())
+
+        if conflict_files:
+            files_str = ", ".join(conflict_files[:5])
+            return f"Cannot commit: unresolved merge conflicts in {files_str}. Resolve conflicts first."
+        return ""
 
     def _undo(self) -> str:
         """Undo the last agent commit using git revert (safe).

@@ -119,6 +119,122 @@ class TestShellTool:
         # Should return error info, not crash
         assert isinstance(result, str)
 
+    def test_sudo_blocked(self):
+        """sudo rm should be blocked."""
+        tool = ShellTool()
+        assert tool._is_dangerous("sudo rm -rf /tmp/test") is True
+
+    def test_fork_bomb_blocked(self):
+        """Fork bomb should be blocked."""
+        tool = ShellTool()
+        assert tool._is_dangerous(":(){ :|:& };:") is True
+
+    def test_safe_command_not_blocked(self):
+        """Normal commands should not be blocked."""
+        tool = ShellTool()
+        assert tool._is_dangerous("ls -la") is False
+        assert tool._is_dangerous("python3 test.py") is False
+        assert tool._is_dangerous("git status") is False
+
+    def test_interactive_vim_blocked(self):
+        """Interactive editors should be blocked."""
+        tool = ShellTool()
+        assert tool._is_interactive("vim test.py") is True
+        assert tool._is_interactive("nano config.yaml") is True
+
+    def test_interactive_rebase_blocked(self):
+        """Interactive git rebase should be blocked."""
+        tool = ShellTool()
+        assert tool._is_interactive("git rebase -i HEAD~3") is True
+        assert tool._is_interactive("git add -i") is True
+
+    def test_interactive_top_blocked(self):
+        """Bare top/htop should be blocked."""
+        tool = ShellTool()
+        assert tool._is_interactive("top") is True
+        assert tool._is_interactive("htop") is True
+
+    def test_noninteractive_commands_pass(self):
+        """Non-interactive commands should not be blocked."""
+        tool = ShellTool()
+        assert tool._is_interactive("git status") is False
+        assert tool._is_interactive("python3 script.py") is False
+        assert tool._is_interactive("ls -la") is False
+        assert tool._is_interactive("grep pattern file.txt") is False
+
+    def test_interactive_command_returns_message(self):
+        """Interactive commands should return a helpful error."""
+        tool = ShellTool()
+        result = tool.execute("run_command", {"command": "vim test.py"})
+        assert "Blocked" in result
+        assert "interactive" in result.lower()
+
+    def test_empty_command(self):
+        """Empty command should return error."""
+        tool = ShellTool()
+        result = tool.execute("run_command", {"command": ""})
+        assert "Error" in result or "empty" in result.lower()
+
+
+class TestGitTool:
+    """Tests for the git tool."""
+
+    def test_tool_definitions(self):
+        tool = GitTool()
+        defs = tool.get_tool_definitions()
+        assert len(defs) >= 5
+        names = [d["function"]["name"] for d in defs]
+        assert "git_status" in names
+        assert "git_diff" in names
+        assert "git_log" in names
+        assert "git_commit" in names
+        assert "git_undo" in names
+
+    def test_check_conflicts_clean(self):
+        """No conflicts should return empty string."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            import subprocess
+            subprocess.run(["git", "init"], cwd=tmpdir, capture_output=True)
+            tool = GitTool(working_dir=tmpdir)
+            result = tool._check_conflicts()
+            assert result == ""
+
+    def test_has_uncommitted_changes_empty(self):
+        """Fresh repo should have no uncommitted changes."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            import subprocess
+            subprocess.run(["git", "init"], cwd=tmpdir, capture_output=True)
+            tool = GitTool(working_dir=tmpdir)
+            assert tool.has_uncommitted_changes() is False
+
+    def test_has_uncommitted_changes_with_file(self):
+        """Repo with new file should have uncommitted changes."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            import subprocess
+            subprocess.run(["git", "init"], cwd=tmpdir, capture_output=True)
+            (Path(tmpdir) / "test.txt").write_text("hello")
+            tool = GitTool(working_dir=tmpdir)
+            assert tool.has_uncommitted_changes() is True
+
+    def test_get_current_branch(self):
+        """Should return branch name."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            import subprocess
+            subprocess.run(["git", "init", "-b", "main"], cwd=tmpdir, capture_output=True)
+            subprocess.run(["git", "config", "user.email", "t@t.com"], cwd=tmpdir, capture_output=True)
+            subprocess.run(["git", "config", "user.name", "T"], cwd=tmpdir, capture_output=True)
+            (Path(tmpdir) / "init.txt").write_text("init")
+            subprocess.run(["git", "add", "."], cwd=tmpdir, capture_output=True)
+            subprocess.run(["git", "commit", "-m", "init"], cwd=tmpdir, capture_output=True)
+            tool = GitTool(working_dir=tmpdir)
+            branch = tool.get_current_branch()
+            assert branch == "main"
+
+    def test_agent_commit_tag(self):
+        """Commits should be tagged with [forge]."""
+        from forge.tools.git import AGENT_COMMIT_TAG
+        assert AGENT_COMMIT_TAG == "[forge]"
+
 
 class TestWebTool:
     """Tests for the web tool."""
