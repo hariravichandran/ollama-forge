@@ -31,6 +31,7 @@ class LLMStats:
 
     total_calls: int = 0
     total_tokens: int = 0
+    total_prompt_tokens: int = 0
     total_time_s: float = 0.0
     errors: int = 0
 
@@ -231,13 +232,16 @@ class OllamaClient:
 
                 data = r.json()
                 tokens = data.get("eval_count", 0)
+                prompt_tokens = data.get("prompt_eval_count", 0)
                 self.stats.total_calls += 1
                 self.stats.total_tokens += tokens
+                self.stats.total_prompt_tokens += prompt_tokens
                 self.stats.total_time_s += elapsed
 
                 return {
                     "response": data.get("response", ""),
                     "tokens": tokens,
+                    "prompt_tokens": prompt_tokens,
                     "time_s": elapsed,
                     "tokens_per_sec": tokens / max(0.01, elapsed),
                 }
@@ -333,14 +337,17 @@ class OllamaClient:
                 data = r.json()
                 msg = data.get("message", {})
                 tokens = data.get("eval_count", 0)
+                prompt_tokens = data.get("prompt_eval_count", 0)
 
                 self.stats.total_calls += 1
                 self.stats.total_tokens += tokens
+                self.stats.total_prompt_tokens += prompt_tokens
                 self.stats.total_time_s += elapsed
 
                 result: dict[str, Any] = {
                     "response": msg.get("content", ""),
                     "tokens": tokens,
+                    "prompt_tokens": prompt_tokens,
                     "time_s": elapsed,
                     "tokens_per_sec": tokens / max(0.01, elapsed),
                 }
@@ -428,9 +435,11 @@ class OllamaClient:
                         # Done signal
                         if data.get("done"):
                             total_tokens = data.get("eval_count", 0)
+                            prompt_tokens = data.get("prompt_eval_count", 0)
                             elapsed = time.time() - start
                             self.stats.total_calls += 1
                             self.stats.total_tokens += total_tokens
+                            self.stats.total_prompt_tokens += prompt_tokens
                             self.stats.total_time_s += elapsed
                             yield {
                                 "type": "done",

@@ -334,6 +334,21 @@ class SelfImproveAgent:
         except Exception:
             diff = ""
 
+        # Run LLM-proposed test commands if any
+        proposed_tests = proposal.get("tests_to_run", [])
+        if proposed_tests:
+            if not self._run_tests(proposed_tests):
+                log.warning("LLM-proposed tests failed, rolling back")
+                self._git_checkout_files(files_changed)
+                return ImprovementResult(
+                    idea_id=idea_id,
+                    success=False,
+                    description=candidate.get("title", ""),
+                    files_changed=[],
+                    tests_passed=False,
+                    committed=False,
+                )
+
         # QA validation: existing tests + generated tests + code review
         qa_result = self.qa.validate_changes(
             files_changed=files_changed,
