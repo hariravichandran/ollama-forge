@@ -246,7 +246,8 @@ class TestRunTests:
             agent = SelfImproveAgent(
                 client=client, idea_collector=ideas, repo_dir=tmpdir,
             )
-            assert agent._run_tests(["true"]) is True
+            # Use a safe whitelisted command that succeeds (--version exits 0)
+            assert agent._run_tests(["python -m pytest --version"]) is True
 
     def test_failing_command(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -255,7 +256,8 @@ class TestRunTests:
             agent = SelfImproveAgent(
                 client=client, idea_collector=ideas, repo_dir=tmpdir,
             )
-            assert agent._run_tests(["false"]) is False
+            # Use a safe whitelisted command that fails (invalid pytest option)
+            assert agent._run_tests(["python -m pytest --__invalid_opt_xyz"]) is False
 
     def test_empty_runs_default(self):
         with tempfile.TemporaryDirectory() as tmpdir:

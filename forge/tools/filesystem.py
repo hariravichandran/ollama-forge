@@ -21,6 +21,21 @@ log = get_logger("tools.filesystem")
 # Minimum similarity ratio for fuzzy matching (0.0 to 1.0)
 FUZZY_MATCH_THRESHOLD = 0.75
 
+# Maximum file size for reading (10 MB)
+MAX_READ_SIZE = 10 * 1024 * 1024
+
+# Binary file extensions — refuse to read as text
+BINARY_EXTENSIONS = {
+    ".pyc", ".pyo", ".so", ".dll", ".dylib", ".o", ".a",
+    ".exe", ".bin", ".dat", ".db", ".sqlite", ".sqlite3",
+    ".zip", ".tar", ".gz", ".bz2", ".xz", ".7z", ".rar",
+    ".png", ".jpg", ".jpeg", ".gif", ".bmp", ".ico", ".webp", ".svg",
+    ".mp3", ".mp4", ".avi", ".mkv", ".wav", ".flac", ".ogg",
+    ".pdf", ".doc", ".docx", ".xls", ".xlsx", ".ppt", ".pptx",
+    ".woff", ".woff2", ".ttf", ".eot",
+    ".class", ".jar", ".war",
+}
+
 
 class FilesystemTool:
     """File operations for agents."""
@@ -131,12 +146,39 @@ class FilesystemTool:
             return f"Error: {e}"
 
     def _resolve_path(self, path: str) -> Path:
-        """Resolve a path relative to working directory, with safety checks."""
-        resolved = (self.working_dir / path).resolve()
+        """Resolve a path relative to working directory, with safety checks.
+
+        Validates against directory traversal and symlink escapes.
+        """
+        target = self.working_dir / path
+        resolved = target.resolve()
         # Prevent directory traversal outside working directory
         if not str(resolved).startswith(str(self.working_dir)):
             raise ValueError(f"Path escapes working directory: {path}")
+        # Symlink safety: if the original path is a symlink, verify its
+        # resolved target is still within the working directory
+        if target.is_symlink():
+            link_target = target.resolve()
+            if not str(link_target).startswith(str(self.working_dir)):
+                raise ValueError(f"Symlink target escapes working directory: {path}")
         return resolved
+
+    @staticmethod
+    def _is_binary(path: Path) -> bool:
+        """Check if a file is likely binary based on extension and content.
+
+        Uses extension check first (fast), then falls back to reading
+        a small sample and checking for null bytes.
+        """
+        if path.suffix.lower() in BINARY_EXTENSIONS:
+            return True
+        # Check first 8KB for null bytes (heuristic for binary content)
+        try:
+            with open(path, "rb") as f:
+                chunk = f.read(8192)
+                return b"\x00" in chunk
+        except (OSError, PermissionError):
+            return False
 
     def _read_file(self, path: str, start_line: int = 0, end_line: int = 0) -> str:
         resolved = self._resolve_path(path)
@@ -144,6 +186,16 @@ class FilesystemTool:
             return f"File not found: {path}"
         if resolved.is_dir():
             return f"Path is a directory: {path}"
+
+        # Check file size
+        file_size = resolved.stat().st_size
+        if file_size > MAX_READ_SIZE:
+            size_mb = file_size / (1024 * 1024)
+            return f"File too large: {path} ({size_mb:.1f} MB, max {MAX_READ_SIZE // (1024*1024)} MB)"
+
+        # Check for binary files
+        if self._is_binary(resolved):
+            return f"Cannot read binary file: {path} (extension: {resolved.suffix})"
 
         content = resolved.read_text(errors="replace")
         lines = content.splitlines()
@@ -247,6 +299,9 @@ class FilesystemTool:
 
         for file_path in self.working_dir.glob(glob):
             if not file_path.is_file():
+                continue
+            # Skip binary files in search
+            if self._is_binary(file_path):
                 continue
             try:
                 content = file_path.read_text(errors="replace")

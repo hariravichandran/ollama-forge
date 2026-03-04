@@ -123,16 +123,16 @@ class TestListIdeas:
     def test_list_all(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             collector = IdeaCollector(ideas_dir=tmpdir)
-            collector.submit("A", "desc A")
-            collector.submit("B", "desc B")
+            collector.submit("Idea Alpha", "desc A")
+            collector.submit("Idea Bravo", "desc B")
             ideas = collector.list_ideas()
             assert len(ideas) == 2
 
     def test_filter_by_status(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             collector = IdeaCollector(ideas_dir=tmpdir)
-            collector.submit("A", "desc A")
-            collector.submit("B", "desc B")
+            collector.submit("Idea Alpha", "desc A")
+            collector.submit("Idea Bravo", "desc B")
             # All should be "new"
             ideas = collector.list_ideas(status="new")
             assert len(ideas) == 2
@@ -142,8 +142,8 @@ class TestListIdeas:
     def test_filter_by_category(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             collector = IdeaCollector(ideas_dir=tmpdir)
-            collector.submit("Feature", "desc", category="feature")
-            collector.submit("Bug", "desc", category="bugfix")
+            collector.submit("Feature request item", "desc", category="feature")
+            collector.submit("Bugfix report item", "desc", category="bugfix")
             ideas = collector.list_ideas(category="bugfix")
             assert len(ideas) == 1
             assert ideas[0].category == "bugfix"
@@ -164,8 +164,8 @@ class TestGetNewIdeas:
     def test_returns_new_only(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             collector = IdeaCollector(ideas_dir=tmpdir)
-            collector.submit("A", "desc A")
-            collector.submit("B", "desc B")
+            collector.submit("Idea Alpha", "desc A")
+            collector.submit("Idea Bravo", "desc B")
             # Mark one as evaluated
             idea_id = list(collector._ideas.keys())[0]
             collector.update_status(idea_id, "evaluated")
@@ -179,7 +179,7 @@ class TestUpdateStatus:
     def test_update_existing(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             collector = IdeaCollector(ideas_dir=tmpdir)
-            collector.submit("Idea", "description")
+            collector.submit("Idea for update test", "description")
             idea_id = list(collector._ideas.keys())[0]
             result = collector.update_status(idea_id, "accepted")
             assert "updated" in result.lower()

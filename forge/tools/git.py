@@ -8,6 +8,7 @@ can undo agent commits with a single command.
 from __future__ import annotations
 
 import subprocess
+from pathlib import Path
 from typing import Any, TYPE_CHECKING
 
 from forge.utils.logging import get_logger
@@ -198,6 +199,9 @@ class GitTool:
     def _check_conflicts(self) -> str:
         """Check for unresolved merge conflicts in tracked files.
 
+        Checks both git status indicators (UU, AA, DD) and conflict
+        markers in file content (<<<<<<<, =======, >>>>>>>).
+
         Returns an error message if conflicts found, empty string if clean.
         """
         status = self._run_git("status", "--porcelain")
@@ -205,15 +209,44 @@ class GitTool:
             return ""
 
         conflict_files = []
+        modified_files = []
         for line in status.splitlines():
             # 'UU', 'AA', 'DD' etc. indicate unmerged files
             if line[:2] in ("UU", "AA", "DD", "AU", "UA", "DU", "UD"):
                 conflict_files.append(line[3:].strip())
+            # Track modified files for marker check
+            elif line[:2].strip():
+                modified_files.append(line[3:].strip())
+
+        # Also check modified files for conflict markers in content
+        marker_conflicts = self._check_conflict_markers(modified_files)
+        conflict_files.extend(marker_conflicts)
 
         if conflict_files:
-            files_str = ", ".join(conflict_files[:5])
+            unique = list(dict.fromkeys(conflict_files))  # dedup preserving order
+            files_str = ", ".join(unique[:5])
             return f"Cannot commit: unresolved merge conflicts in {files_str}. Resolve conflicts first."
         return ""
+
+    def _check_conflict_markers(self, files: list[str]) -> list[str]:
+        """Check file content for git conflict markers (<<<<<<<, >>>>>>>).
+
+        Returns list of files containing unresolved conflict markers.
+        """
+        import re
+        conflict_re = re.compile(r"^(<{7}|={7}|>{7})", re.MULTILINE)
+        marker_files = []
+        for f in files:
+            file_path = Path(self.working_dir) / f
+            if not file_path.exists() or not file_path.is_file():
+                continue
+            try:
+                content = file_path.read_text(errors="replace")
+                if conflict_re.search(content):
+                    marker_files.append(f)
+            except (OSError, PermissionError):
+                continue
+        return marker_files
 
     def _undo(self) -> str:
         """Undo the last agent commit using git revert (safe).
@@ -231,7 +264,14 @@ class GitTool:
         return "No agent commits found to undo"
 
     def _create_branch(self, name: str) -> str:
-        """Create and switch to a new branch."""
+        """Create and switch to a new branch.
+
+        Checks if the branch already exists before creating.
+        """
+        # Check if branch already exists
+        existing = self._run_git("branch", "--list", name)
+        if existing and existing != "(no output)":
+            return f"Branch '{name}' already exists. Use 'git checkout {name}' to switch to it."
         result = self._run_git("checkout", "-b", name)
         return result
 
@@ -313,9 +353,38 @@ class GitTool:
             # Clean up: remove quotes, limit length
             message = message.strip('"\'')
             first_line = message.splitlines()[0][:72] if message else ""
+            # Validate the generated message
+            first_line = self._validate_commit_message(first_line)
             return first_line or description[:72] or "Update files"
         except Exception:
             return description[:72] if description else "Update files"
+
+    @staticmethod
+    def _validate_commit_message(message: str) -> str:
+        """Validate and clean a commit message.
+
+        Ensures:
+        - Non-empty after stripping
+        - First line <= 72 chars
+        - No excessive repetition
+        - Strips trailing periods (conventional commits style)
+        """
+        message = message.strip()
+        if not message:
+            return ""
+
+        # Truncate first line
+        first_line = message.splitlines()[0][:72]
+
+        # Detect excessive repetition (e.g., "update update update")
+        words = first_line.lower().split()
+        if words and len(set(words)) == 1 and len(words) > 2:
+            return ""  # reject repetitive messages
+
+        # Strip trailing period (conventional commits style)
+        first_line = first_line.rstrip(".")
+
+        return first_line
 
     def get_current_branch(self) -> str:
         """Get the current branch name."""

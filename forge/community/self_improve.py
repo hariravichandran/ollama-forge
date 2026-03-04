@@ -28,6 +28,7 @@ pull-before-push to avoid conflicts.
 from __future__ import annotations
 
 import json
+import os
 import shutil
 import subprocess
 import time
@@ -47,6 +48,32 @@ STABLE_PUSH_COOLDOWN = 2 * 24 * 3600
 
 # Upstream repo for PRs (community contributors fork from this)
 UPSTREAM_REPO = "hariravichandran/ollama-forge"
+
+# Lock file for serializing concurrent improvement runs
+LOCK_FILE_NAME = "self_improve.lock"
+
+# Safe test command patterns (whitelist approach)
+SAFE_TEST_PATTERNS = [
+    "python -m pytest",
+    "pytest",
+    "python -m unittest",
+    "cargo test",
+    "npm test",
+    "npm run test",
+    "go test",
+    "make test",
+]
+
+# Dangerous patterns in test commands — these should never execute
+DANGEROUS_TEST_PATTERNS = [
+    "rm ", "rm\t", "rmdir",
+    "curl ", "wget ",
+    "sudo ", "su ",
+    "chmod ", "chown ",
+    "mkfs", "dd if=",
+    "> /dev/", "| sh", "| bash",
+    "eval ", "exec ",
+]
 
 
 @dataclass
@@ -113,8 +140,23 @@ class SelfImproveAgent:
     def run_iteration(self) -> ImprovementResult | None:
         """Run one improvement iteration.
 
+        Uses file-based locking to prevent concurrent runs from
+        conflicting with each other.
+
         Returns ImprovementResult if a change was made, None otherwise.
         """
+        # Acquire lock to prevent concurrent runs
+        if not self._acquire_lock():
+            log.warning("Another self-improve iteration is running. Skipping.")
+            return None
+
+        try:
+            return self._run_iteration_locked()
+        finally:
+            self._release_lock()
+
+    def _run_iteration_locked(self) -> ImprovementResult | None:
+        """The actual iteration logic (called while holding the lock)."""
         # Verify gh CLI is available for contributors
         if self.is_contributor and not self._gh_available():
             log.error(
@@ -387,12 +429,21 @@ class SelfImproveAgent:
         )
 
     def _run_tests(self, test_commands: list[str]) -> bool:
-        """Run test commands. Returns True if all pass."""
+        """Run test commands with sanitization. Returns True if all pass.
+
+        Validates commands against a whitelist of safe test patterns
+        and rejects commands containing dangerous patterns.
+        """
         if not test_commands:
             # Default: run pytest if it exists
             test_commands = ["python -m pytest tests/ -x --tb=short"]
 
         for cmd in test_commands:
+            # Sanitize: reject dangerous commands
+            if not self._is_safe_test_command(cmd):
+                log.warning("Blocked unsafe test command: %s", cmd)
+                continue
+
             try:
                 result = subprocess.run(
                     cmd, shell=True, capture_output=True, text=True,
@@ -405,6 +456,29 @@ class SelfImproveAgent:
                 log.warning("Test timed out: %s", cmd)
                 return False
         return True
+
+    @staticmethod
+    def _is_safe_test_command(cmd: str) -> bool:
+        """Check if a test command is safe to execute.
+
+        Validates against a whitelist of known test runners and
+        rejects commands containing dangerous patterns.
+        """
+        cmd_lower = cmd.lower().strip()
+
+        # Check for dangerous patterns
+        for pattern in DANGEROUS_TEST_PATTERNS:
+            if pattern in cmd_lower:
+                return False
+
+        # Check if command starts with a known safe test runner
+        for safe in SAFE_TEST_PATTERNS:
+            if cmd_lower.startswith(safe):
+                return True
+
+        # Unknown test command — reject by default
+        log.warning("Unknown test command pattern, rejecting: %s", cmd)
+        return False
 
     # ─── Contributor mode: fork + PR ─────────────────────────────────────────
 
@@ -588,6 +662,45 @@ class SelfImproveAgent:
         if result.returncode != 0:
             raise RuntimeError(f"git {' '.join(args)} failed: {result.stderr}")
         return result.stdout.strip()
+
+    # ─── Locking ─────────────────────────────────────────────────────────────
+
+    def _acquire_lock(self) -> bool:
+        """Acquire a file-based lock to prevent concurrent runs.
+
+        Returns True if lock acquired, False if another process holds it.
+        Stale locks (older than 1 hour) are automatically cleaned up.
+        """
+        lock_path = self.repo_dir / ".forge_state" / LOCK_FILE_NAME
+        lock_path.parent.mkdir(parents=True, exist_ok=True)
+
+        if lock_path.exists():
+            # Check for stale lock (older than 1 hour)
+            try:
+                lock_data = json.loads(lock_path.read_text())
+                lock_time = lock_data.get("locked_at", 0)
+                if time.time() - lock_time > 3600:
+                    log.warning("Removing stale lock (age: %.0f minutes)", (time.time() - lock_time) / 60)
+                    lock_path.unlink()
+                else:
+                    return False
+            except (json.JSONDecodeError, OSError):
+                lock_path.unlink(missing_ok=True)
+
+        # Write lock file
+        try:
+            lock_path.write_text(json.dumps({
+                "locked_at": time.time(),
+                "pid": os.getpid(),
+            }))
+            return True
+        except OSError:
+            return False
+
+    def _release_lock(self) -> None:
+        """Release the file-based lock."""
+        lock_path = self.repo_dir / ".forge_state" / LOCK_FILE_NAME
+        lock_path.unlink(missing_ok=True)
 
     def _load_state(self) -> dict[str, Any]:
         self.state_file.parent.mkdir(parents=True, exist_ok=True)

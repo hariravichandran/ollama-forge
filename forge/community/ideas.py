@@ -23,6 +23,20 @@ from forge.utils.logging import get_logger
 
 log = get_logger("community.ideas")
 
+# Valid categories for ideas
+VALID_CATEGORIES = {"feature", "improvement", "bugfix", "performance", "ux", "other"}
+
+# Valid sources for ideas
+VALID_SOURCES = {"user", "agent", "self-improve"}
+
+# Validation limits
+MIN_TITLE_LENGTH = 5
+MAX_TITLE_LENGTH = 200
+MAX_DESCRIPTION_LENGTH = 2000
+
+# Fuzzy duplicate detection threshold (Levenshtein-based)
+FUZZY_DEDUP_THRESHOLD = 0.85
+
 
 @dataclass
 class Idea:
@@ -59,27 +73,49 @@ class IdeaCollector:
         self._ideas: dict[str, Idea] = self._load()
 
     def submit(self, title: str, description: str, category: str = "improvement", source: str = "user") -> str:
-        """Submit a new idea.
+        """Submit a new idea with validation and fuzzy dedup.
+
+        Validates:
+        - Title length (5-200 chars)
+        - Description length (max 2000 chars)
+        - Category is a known enum value
+        - Source is a known value
+        - Not a near-duplicate of existing ideas (>85% similar)
 
         Returns confirmation message.
         """
         if not self.enabled:
             return "Community ideas collection is disabled. Enable with FORGE_COMMUNITY_IDEAS=1"
 
+        # Input validation
+        errors = self._validate_idea(title, description, category, source)
+        if errors:
+            return f"Invalid idea: {'; '.join(errors)}"
+
+        # Normalize category
+        category = category.lower().strip()
+
         # Generate short ID from content hash
         content_hash = hashlib.sha256(f"{title}{description}".encode()).hexdigest()[:8]
 
-        # Check for duplicates
+        # Check for exact duplicates
         if content_hash in self._ideas:
             self._ideas[content_hash].votes += 1
             self._save()
             return f"Similar idea already exists (id: {content_hash}). Added your vote (+1)."
 
+        # Check for fuzzy duplicates
+        fuzzy_match = self._find_fuzzy_duplicate(title, description)
+        if fuzzy_match:
+            fuzzy_match.votes += 1
+            self._save()
+            return f"Very similar idea already exists (id: {fuzzy_match.id}). Added your vote (+1)."
+
         idea = Idea(
             id=content_hash,
             category=category,
-            title=title,
-            description=description,
+            title=title.strip(),
+            description=description.strip(),
             submitted_at=time.time(),
             source=source,
         )
@@ -87,6 +123,47 @@ class IdeaCollector:
         self._save()
         log.info("New idea submitted: %s (%s)", title, content_hash)
         return f"Idea submitted! ID: {content_hash}. Thank you for contributing."
+
+    @staticmethod
+    def _validate_idea(title: str, description: str, category: str, source: str) -> list[str]:
+        """Validate idea inputs. Returns list of errors (empty = valid)."""
+        errors: list[str] = []
+
+        if not title or len(title.strip()) < MIN_TITLE_LENGTH:
+            errors.append(f"title must be at least {MIN_TITLE_LENGTH} characters")
+        elif len(title) > MAX_TITLE_LENGTH:
+            errors.append(f"title must be at most {MAX_TITLE_LENGTH} characters")
+
+        if len(description) > MAX_DESCRIPTION_LENGTH:
+            errors.append(f"description must be at most {MAX_DESCRIPTION_LENGTH} characters")
+
+        if category.lower().strip() not in VALID_CATEGORIES:
+            errors.append(f"category must be one of: {', '.join(sorted(VALID_CATEGORIES))}")
+
+        if source.lower().strip() not in VALID_SOURCES:
+            errors.append(f"source must be one of: {', '.join(sorted(VALID_SOURCES))}")
+
+        return errors
+
+    def _find_fuzzy_duplicate(self, title: str, description: str) -> Idea | None:
+        """Find a near-duplicate idea using text similarity.
+
+        Uses SequenceMatcher to detect ideas with >85% similarity
+        in title+description, catching minor rewordings.
+        """
+        from difflib import SequenceMatcher
+
+        new_text = f"{title} {description}".lower()
+        for existing in self._ideas.values():
+            existing_text = f"{existing.title} {existing.description}".lower()
+            # Quick length ratio check
+            len_ratio = len(new_text) / max(len(existing_text), 1)
+            if len_ratio < 0.5 or len_ratio > 2.0:
+                continue
+            ratio = SequenceMatcher(None, new_text, existing_text).ratio()
+            if ratio >= FUZZY_DEDUP_THRESHOLD:
+                return existing
+        return None
 
     def list_ideas(self, status: str = "", category: str = "") -> list[Idea]:
         """List ideas, optionally filtered by status or category."""
