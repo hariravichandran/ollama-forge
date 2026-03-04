@@ -837,3 +837,135 @@ class CodebaseIndexer:
                     ]
                     if not self._symbol_index[key]:
                         del self._symbol_index[key]
+
+
+class CodebaseTool:
+    """Agent-callable tool wrapper around CodebaseIndexer.
+
+    Exposes codebase search, symbol lookup, and project overview as tool
+    functions that agents can invoke through Ollama tool calling.
+    """
+
+    name = "codebase"
+    description = "Search code, find symbols, and explore project structure"
+
+    def __init__(self, working_dir: str = ".", client: Any = None):
+        self._indexer = CodebaseIndexer(project_dir=working_dir, client=client)
+        self._indexed = False
+
+    def _ensure_indexed(self) -> None:
+        """Build or load the index on first use."""
+        if not self._indexed:
+            self._indexer._load_index()
+            if not self._indexer._file_index:
+                self._indexer.build_index()
+            self._indexed = True
+
+    def get_tool_definitions(self) -> list[dict[str, Any]]:
+        """Return Ollama tool-calling definitions."""
+        return [
+            {
+                "type": "function",
+                "function": {
+                    "name": "codebase_search",
+                    "description": "Search the codebase for a query (files, symbols, code content)",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "query": {"type": "string", "description": "Search query (e.g., 'authentication', 'UserModel', 'handle_request')"},
+                            "max_results": {"type": "integer", "description": "Maximum results to return (default 10)"},
+                        },
+                        "required": ["query"],
+                    },
+                },
+            },
+            {
+                "type": "function",
+                "function": {
+                    "name": "find_symbol",
+                    "description": "Find a specific symbol (function, class, method) by name",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "name": {"type": "string", "description": "Symbol name to find"},
+                        },
+                        "required": ["name"],
+                    },
+                },
+            },
+            {
+                "type": "function",
+                "function": {
+                    "name": "project_overview",
+                    "description": "Get a high-level overview of the project structure, files, and languages",
+                    "parameters": {"type": "object", "properties": {}},
+                },
+            },
+            {
+                "type": "function",
+                "function": {
+                    "name": "file_summary",
+                    "description": "Get a summary of a specific file (symbols, imports, structure)",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "path": {"type": "string", "description": "File path relative to project root"},
+                        },
+                        "required": ["path"],
+                    },
+                },
+            },
+        ]
+
+    def execute(self, function_name: str, args: dict[str, Any]) -> str:
+        """Execute a codebase tool function."""
+        self._ensure_indexed()
+
+        handlers = {
+            "codebase_search": self._search,
+            "find_symbol": self._find_symbol,
+            "project_overview": self._overview,
+            "file_summary": self._file_summary,
+        }
+        handler = handlers.get(function_name)
+        if not handler:
+            return f"Unknown function: {function_name}"
+        try:
+            return handler(**args)
+        except Exception as e:
+            return f"Error: {e}"
+
+    def _search(self, query: str, max_results: int = 10) -> str:
+        """Search the codebase."""
+        results = self._indexer.search(query, max_results=max_results)
+        if not results:
+            return f"No results found for: {query}"
+
+        lines = [f"Found {len(results)} results for '{query}':\n"]
+        for r in results:
+            lines.append(f"  {r.file}:{r.line}  {r.content}")
+            if r.context:
+                lines.append(f"    {r.context[:100]}")
+        return "\n".join(lines)
+
+    def _find_symbol(self, name: str) -> str:
+        """Find a symbol by name."""
+        symbols = self._indexer.find_symbol(name)
+        if not symbols:
+            return f"No symbol found: {name}"
+
+        lines = [f"Found {len(symbols)} matches for '{name}':\n"]
+        for s in symbols:
+            lines.append(f"  {s.kind}: {s.signature or s.name}")
+            lines.append(f"    {s.file}:{s.line}")
+            if s.docstring:
+                lines.append(f"    {s.docstring[:100]}")
+        return "\n".join(lines)
+
+    def _overview(self) -> str:
+        """Get project overview."""
+        return self._indexer.get_project_overview()
+
+    def _file_summary(self, path: str) -> str:
+        """Get file summary."""
+        return self._indexer.get_file_summary(path)

@@ -357,7 +357,11 @@ def _detect_rocm_version() -> str:
 
 
 def _detect_intel_gpu_linux() -> GPUInfo | None:
-    """Basic Intel GPU detection via lspci (Linux only)."""
+    """Detect Intel GPU via lspci and sysfs (Linux only).
+
+    Supports Intel Arc discrete GPUs (A-series) with dedicated VRAM,
+    as well as integrated Intel UHD/Iris GPUs.
+    """
     try:
         result = subprocess.run(
             ["lspci", "-d", "8086:", "-nn"],
@@ -367,18 +371,96 @@ def _detect_intel_gpu_linux() -> GPUInfo | None:
             return None
 
         for line in result.stdout.splitlines():
-            if "VGA" in line or "Display" in line:
-                match = re.search(r"\] (.+)$", line)
-                name = match.group(1).strip() if match else "Intel GPU"
-                return GPUInfo(
-                    vendor="intel",
-                    name=name,
-                    driver="cpu",
-                    is_igpu=True,
-                )
+            if "VGA" not in line and "Display" not in line:
+                continue
+
+            # Parse GPU name from lspci output
+            match = re.search(r"\] (.+)$", line)
+            raw_name = match.group(1).strip() if match else "Intel GPU"
+
+            # Clean up: strip trailing PCI IDs like [8086:56a0]
+            name = re.sub(r"\s*\[[\da-fA-F]{4}:[\da-fA-F]{4}\]\s*$", "", raw_name).strip()
+            if not name:
+                name = raw_name
+
+            # Determine if this is a discrete Arc GPU
+            is_arc = bool(re.search(r"\bArc\b", name, re.IGNORECASE))
+
+            # Detect driver: prefer xe (modern), fall back to i915
+            driver = "cpu"
+            driver_version = ""
+            for drv_name in ("xe", "i915"):
+                drv_path = Path(f"/sys/module/{drv_name}")
+                if drv_path.exists():
+                    driver = drv_name
+                    ver_path = drv_path / "version"
+                    if ver_path.exists():
+                        try:
+                            driver_version = ver_path.read_text().strip()
+                        except OSError:
+                            pass
+                    break
+
+            # Detect VRAM from sysfs
+            vram_gb = _detect_intel_vram_linux()
+
+            return GPUInfo(
+                vendor="intel",
+                name=name,
+                vram_gb=vram_gb,
+                total_gb=vram_gb,
+                driver=driver,
+                driver_version=driver_version,
+                is_igpu=not is_arc,
+            )
     except (FileNotFoundError, subprocess.TimeoutExpired):
         pass
     return None
+
+
+def _detect_intel_vram_linux() -> float:
+    """Detect Intel GPU VRAM from sysfs.
+
+    Intel Arc discrete GPUs expose VRAM through /sys/class/drm/card*/device/.
+    """
+    drm_path = Path("/sys/class/drm")
+    if not drm_path.exists():
+        return 0.0
+
+    for card_dir in sorted(drm_path.glob("card[0-9]*")):
+        device_dir = card_dir / "device"
+        if not device_dir.exists():
+            continue
+
+        # Check if Intel (vendor ID 0x8086)
+        vendor_path = device_dir / "vendor"
+        if vendor_path.exists():
+            try:
+                vendor_id = vendor_path.read_text().strip()
+                if vendor_id != "0x8086":
+                    continue
+            except OSError:
+                continue
+
+        # Dedicated VRAM (Intel Arc discrete GPUs)
+        vram_path = device_dir / "mem_info_vram_total"
+        if vram_path.exists():
+            try:
+                vram_bytes = int(vram_path.read_text().strip())
+                return vram_bytes / (1024 ** 3)
+            except (ValueError, OSError):
+                pass
+
+        # Alternative: lmem_total_bytes
+        lmem_path = device_dir / "lmem_total_bytes"
+        if lmem_path.exists():
+            try:
+                lmem_bytes = int(lmem_path.read_text().strip())
+                return lmem_bytes / (1024 ** 3)
+            except (ValueError, OSError):
+                pass
+
+    return 0.0
 
 
 def _detect_gpu_windows() -> GPUInfo | None:

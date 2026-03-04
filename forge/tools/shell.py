@@ -91,6 +91,8 @@ class ShellTool:
 
     def _is_dangerous(self, command: str) -> bool:
         """Check if a command is potentially destructive."""
+        import re
+
         dangerous_patterns = [
             "rm -rf /",
             "rm -rf ~",
@@ -99,26 +101,41 @@ class ShellTool:
             "dd if=",
             ":(){",  # fork bomb
             "> /dev/sd",
-            "chmod -R 777 /",
             "chmod 000",
-            "curl | sh",
-            "curl | bash",
-            "wget | sh",
-            "wget | bash",
             "sudo rm",
             "sudo mkfs",
             "sudo dd",
             "sudo chmod",
             "sudo chown /",
+            "shred ",
+            "wipefs",
+            "> /dev/null 2>&1 &",  # silent background execution
+            "nohup rm",
+            "xargs rm",
+            "find / -delete",
+            "find / -exec rm",
+            "truncate -s 0 /",
+            "systemctl disable",
+            "systemctl mask",
         ]
         cmd_lower = command.lower().strip()
-        return any(pattern in cmd_lower for pattern in dangerous_patterns)
+        if any(pattern in cmd_lower for pattern in dangerous_patterns):
+            return True
+
+        # Regex-based checks for patterns with variable content in between
+        dangerous_regexes = [
+            r"curl\s+.*\|\s*(sh|bash)",     # curl URL | sh/bash
+            r"wget\s+.*\|\s*(sh|bash)",     # wget URL | sh/bash
+            r"chmod\s+-r\s+777\s+/",        # chmod -R 777 /
+        ]
+        return any(re.search(pat, cmd_lower) for pat in dangerous_regexes)
 
     def _is_interactive(self, command: str) -> bool:
         """Check if a command requires interactive input (would hang)."""
         # Single-word commands that are interactive
         interactive_exact = {
-            "top", "htop", "ipython", "irb", "python", "python3", "node",
+            "top", "htop", "btop", "ipython", "irb", "python", "python3",
+            "node", "bpython", "mysql", "psql", "sqlite3", "mongo", "redis-cli",
         }
 
         # Prefixes that indicate interactive mode
@@ -126,10 +143,13 @@ class ShellTool:
             "git rebase -i",
             "git add -i",
             "git add --interactive",
-            "vim ", "nano ", "emacs ", "vi ",
+            "vim ", "nano ", "emacs ", "vi ", "nvim ", "micro ",
             "less ", "more ",
             "python3 -i", "python -i",
-            "ssh ", "telnet ", "ftp ",
+            "ssh ", "telnet ", "ftp ", "sftp ",
+            "docker exec -it", "docker run -it",
+            "kubectl exec -it",
+            "nslookup",
         ]
 
         cmd_lower = command.lower().strip()

@@ -13,21 +13,39 @@ from forge.utils.logging import get_logger
 log = get_logger("hardware.rocm")
 
 # Known GFX version overrides for AMD APUs/GPUs that need HSA_OVERRIDE_GFX_VERSION.
-# Maps device IDs or architecture names to the required GFX version.
+# Maps GFX architecture IDs to the required override version string.
+#
+# RDNA2 (GFX 10.3.x) — Radeon RX 6000 series & Rembrandt/Barcelo APUs
+#   Needs HSA_OVERRIDE_GFX_VERSION="10.3.0"
+#
+# RDNA3 (GFX 11.0.x) — Radeon RX 7000 series & Phoenix/Hawk Point APUs
+#   Needs HSA_OVERRIDE_GFX_VERSION="11.0.0"
+#
+# RDNA3.5 (GFX 11.5.x) — Strix Point APUs (Ryzen AI 300 series)
+#   Needs HSA_OVERRIDE_GFX_VERSION="11.0.0" (maps to nearest supported target)
+#
+# RDNA4 (GFX 12.0.x) — Radeon RX 9070 series (Navi 48/44)
+#   Needs HSA_OVERRIDE_GFX_VERSION="12.0.0"
 GFX_OVERRIDES: dict[str, str] = {
     # RDNA2 APUs (Rembrandt, Barcelo, etc.)
     "gfx1035": "10.3.0",
     "gfx1036": "10.3.0",
-    # RDNA3 APUs (Phoenix, Hawk Point)
-    "gfx1103": "11.0.0",
-    # RDNA2 discrete
+    # RDNA2 discrete (Radeon RX 6800/6900/6700/6600 series)
     "gfx1030": "10.3.0",
     "gfx1031": "10.3.0",
     "gfx1032": "10.3.0",
-    # RDNA3 discrete
+    # RDNA3 APUs (Phoenix, Hawk Point)
+    "gfx1103": "11.0.0",
+    # RDNA3 discrete (Radeon RX 7900/7800/7700/7600 series)
     "gfx1100": "11.0.0",
     "gfx1101": "11.0.0",
     "gfx1102": "11.0.0",
+    # RDNA3.5 APUs (Strix Point — Ryzen AI 300 series)
+    "gfx1150": "11.0.0",
+    "gfx1151": "11.0.0",
+    # RDNA4 discrete (Radeon RX 9070 series — Navi 48/44)
+    "gfx1200": "12.0.0",
+    "gfx1201": "12.0.0",
 }
 
 

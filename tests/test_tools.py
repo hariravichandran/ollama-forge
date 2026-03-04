@@ -333,6 +333,7 @@ class TestToolsRegistry:
         assert "git" in BUILTIN_TOOLS
         assert "web" in BUILTIN_TOOLS
         assert "sandbox" in BUILTIN_TOOLS
+        assert "codebase" in BUILTIN_TOOLS
 
     def test_all_tools_instantiate(self):
         """All built-in tools should be constructable."""
