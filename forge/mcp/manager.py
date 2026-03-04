@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import subprocess
+import time
 from pathlib import Path
 from typing import Any
 
@@ -13,6 +14,10 @@ from forge.mcp.web_search import WebSearchMCP
 from forge.utils.logging import get_logger
 
 log = get_logger("mcp.manager")
+
+# Installation retry settings
+MCP_INSTALL_MAX_RETRIES = 3
+MCP_INSTALL_BACKOFF_BASE = 2.0  # seconds
 
 
 class MCPManager:
@@ -30,6 +35,7 @@ class MCPManager:
 
         self._config: dict[str, Any] = self._load_config()
         self._active_servers: dict[str, Any] = {}
+        self._server_health: dict[str, bool] = {}  # tracks last known health status
 
         # Built-in web search — always available
         self.web_search = WebSearchMCP()
@@ -65,14 +71,32 @@ class MCPManager:
         if not entry:
             return f"Unknown MCP: {name}. Use 'forge mcp search' to find available MCPs."
 
-        # Install if needed
+        # Install if needed (with retries)
         if not entry.builtin and entry.install_cmd:
             log.info("Installing MCP: %s", name)
-            result = subprocess.run(
-                entry.install_cmd, shell=True, capture_output=True, text=True, timeout=120,
-            )
-            if result.returncode != 0:
-                return f"Failed to install {name}: {result.stderr}"
+            last_error = ""
+            for attempt in range(MCP_INSTALL_MAX_RETRIES):
+                try:
+                    result = subprocess.run(
+                        entry.install_cmd, shell=True, capture_output=True, text=True, timeout=120,
+                    )
+                    if result.returncode == 0:
+                        break
+                    last_error = result.stderr
+                    if attempt < MCP_INSTALL_MAX_RETRIES - 1:
+                        delay = MCP_INSTALL_BACKOFF_BASE ** (attempt + 1)
+                        log.warning(
+                            "MCP install attempt %d failed, retrying in %.0fs: %s",
+                            attempt + 1, delay, result.stderr[:100],
+                        )
+                        time.sleep(delay)
+                except subprocess.TimeoutExpired:
+                    last_error = "installation timed out"
+                    if attempt < MCP_INSTALL_MAX_RETRIES - 1:
+                        log.warning("MCP install timed out (attempt %d), retrying", attempt + 1)
+                        continue
+            else:
+                return f"Failed to install {name} after {MCP_INSTALL_MAX_RETRIES} attempts: {last_error}"
 
         # Save config
         mcp_config = config or entry.config_example.copy()
@@ -144,6 +168,47 @@ class MCPManager:
 
         return tools
 
+    def health_check(self) -> dict[str, bool]:
+        """Check health of all enabled MCPs.
+
+        Returns a dict mapping MCP name to health status (True=healthy).
+        Built-in MCPs are always healthy. External MCPs are checked
+        by verifying their binary/command exists.
+        """
+        results: dict[str, bool] = {}
+        for name in self.get_enabled():
+            entry = MCP_REGISTRY.get(name)
+            if not entry:
+                results[name] = False
+                continue
+
+            if entry.builtin:
+                results[name] = True
+            else:
+                # Check if the start command's binary exists
+                healthy = self._check_mcp_binary(entry)
+                results[name] = healthy
+                if not healthy:
+                    log.warning("MCP '%s' health check failed", name)
+
+        self._server_health = results
+        return results
+
+    @staticmethod
+    def _check_mcp_binary(entry: MCPEntry) -> bool:
+        """Check if an MCP's package binary is importable/available."""
+        if not entry.package:
+            return True  # No package means it's a built-in or not applicable
+        # Try to check if the package is installed
+        try:
+            result = subprocess.run(
+                ["python3", "-c", f"import importlib; importlib.import_module('{entry.package.replace('-', '_')}')"],
+                capture_output=True, text=True, timeout=5,
+            )
+            return result.returncode == 0
+        except (subprocess.TimeoutExpired, OSError):
+            return False
+
     def _load_config(self) -> dict[str, Any]:
         if self.config_path.exists():
             try:
@@ -154,6 +219,13 @@ class MCPManager:
         return {}
 
     def _save_config(self) -> None:
-        self.config_path.parent.mkdir(parents=True, exist_ok=True)
-        with open(self.config_path, "w") as f:
-            yaml.dump(self._config, f, default_flow_style=False)
+        """Save MCP configuration to disk with atomic write."""
+        try:
+            self.config_path.parent.mkdir(parents=True, exist_ok=True)
+            # Write to temp file first, then rename for atomicity
+            tmp_path = self.config_path.with_suffix(".yaml.tmp")
+            content = yaml.dump(self._config, default_flow_style=False)
+            tmp_path.write_text(content)
+            tmp_path.rename(self.config_path)
+        except OSError as e:
+            log.error("Failed to save MCP config: %s", e)

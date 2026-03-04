@@ -86,6 +86,10 @@ class BaseAgent:
                 if func_name:
                     self._function_tool_map[func_name] = tool
 
+        # Circuit breaker: track consecutive failures per tool function
+        self._tool_failure_counts: dict[str, int] = {}
+        self._tool_circuit_threshold = 3  # open circuit after N consecutive failures
+
     def get_tool_definitions(self) -> list[dict[str, Any]]:
         """Get all tool definitions for Ollama tool calling (cached)."""
         if self._cached_tool_defs is None:
@@ -202,11 +206,27 @@ class BaseAgent:
     def _execute_tool(self, function_name: str, args: dict[str, Any]) -> str:
         """Route a tool call to the appropriate tool handler.
 
+        Implements a circuit breaker pattern: after N consecutive failures
+        for the same tool function, the circuit "opens" and the tool is
+        temporarily skipped to prevent cascading failures.
+
         Checks permissions before executing. If the user denies
         the action, returns a message indicating denial.
         Wraps execution in try/except to prevent tool errors from
         crashing the chat loop.
         """
+        # Circuit breaker: skip tools that have failed too many times in a row
+        failure_count = self._tool_failure_counts.get(function_name, 0)
+        if failure_count >= self._tool_circuit_threshold:
+            log.warning(
+                "Circuit breaker open for '%s' (%d consecutive failures), skipping",
+                function_name, failure_count,
+            )
+            return (
+                f"Tool '{function_name}' is temporarily unavailable after "
+                f"{failure_count} consecutive failures. Try a different approach."
+            )
+
         # Check permission before executing
         if not self.permissions.check(function_name, context=args):
             log.info("Permission denied for %s", function_name)
@@ -216,12 +236,27 @@ class BaseAgent:
         tool = self._function_tool_map.get(function_name)
         if tool:
             try:
-                return tool.execute(function_name, args)
+                result = tool.execute(function_name, args)
+                # Success — reset failure counter
+                self._tool_failure_counts[function_name] = 0
+                return result
             except Exception as e:
                 log.error("Tool execution error for %s: %s", function_name, e)
+                self._tool_failure_counts[function_name] = failure_count + 1
                 return f"Tool error in '{function_name}': {e}"
 
         return f"Unknown tool function: {function_name}"
+
+    def reset_circuit_breaker(self, function_name: str | None = None) -> None:
+        """Reset circuit breaker for a specific tool or all tools.
+
+        Call this when the underlying issue has been resolved
+        (e.g., a service restarted, a file restored).
+        """
+        if function_name:
+            self._tool_failure_counts.pop(function_name, None)
+        else:
+            self._tool_failure_counts.clear()
 
     def reset(self) -> None:
         """Clear conversation history and context cache."""

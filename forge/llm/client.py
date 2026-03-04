@@ -73,11 +73,29 @@ class OllamaClient:
         self._models_cache: list[dict[str, Any]] = []
         self._models_cache_time: float = 0
         self._models_cache_ttl: float = 300  # 5 minutes
+        # Session lifecycle tracking — recreate session if too old
+        self._session_created: float = time.time()
+        self._session_max_age: float = 1800  # 30 minutes
+
+    @staticmethod
+    def _backoff_delay(attempt: int, base: float = 1.0, max_delay: float = 10.0) -> float:
+        """Calculate exponential backoff delay: base * 2^attempt, capped at max_delay."""
+        delay = min(base * (2 ** attempt), max_delay)
+        return delay
+
+    def _get_session(self) -> requests.Session:
+        """Get HTTP session, recreating if stale to prevent connection issues."""
+        if time.time() - self._session_created > self._session_max_age:
+            self._session.close()
+            self._session = requests.Session()
+            self._session_created = time.time()
+            log.debug("Recreated HTTP session (max age exceeded)")
+        return self._session
 
     def is_available(self) -> bool:
         """Check if Ollama server is running."""
         try:
-            r = self._session.get(f"{self.base_url}/api/version", timeout=5)
+            r = self._get_session().get(f"{self.base_url}/api/version", timeout=5)
             return r.status_code == 200
         except (requests.ConnectionError, requests.exceptions.RequestException, OSError):
             return False
@@ -85,7 +103,7 @@ class OllamaClient:
     def get_version(self) -> str:
         """Get Ollama server version."""
         try:
-            r = self._session.get(f"{self.base_url}/api/version", timeout=5)
+            r = self._get_session().get(f"{self.base_url}/api/version", timeout=5)
             if r.status_code == 200:
                 return r.json().get("version", "unknown")
         except requests.ConnectionError:
@@ -98,7 +116,7 @@ class OllamaClient:
         if self._models_cache and (now - self._models_cache_time) < self._models_cache_ttl:
             return self._models_cache
         try:
-            r = self._session.get(f"{self.base_url}/api/tags", timeout=10)
+            r = self._get_session().get(f"{self.base_url}/api/tags", timeout=10)
             if r.status_code == 200:
                 self._models_cache = r.json().get("models", [])
                 self._models_cache_time = now
@@ -110,7 +128,7 @@ class OllamaClient:
     def list_running(self) -> list[dict[str, Any]]:
         """List models currently loaded in memory."""
         try:
-            r = self._session.get(f"{self.base_url}/api/ps", timeout=5)
+            r = self._get_session().get(f"{self.base_url}/api/ps", timeout=5)
             if r.status_code == 200:
                 return r.json().get("models", [])
         except requests.ConnectionError:
@@ -130,7 +148,7 @@ class OllamaClient:
         """
         log.info("Pulling model: %s", model)
         try:
-            r = self._session.post(
+            r = self._get_session().post(
                 f"{self.base_url}/api/pull",
                 json={"name": model, "stream": True},
                 stream=True,
@@ -225,10 +243,10 @@ class OllamaClient:
         for attempt in range(1 + self.max_retries):
             start = time.time()
             try:
-                r = self._session.post(
+                r = self._get_session().post(
                     f"{self.base_url}/api/generate",
                     json=payload,
-                    timeout=timeout,
+                    timeout=(5, timeout),
                 )
                 elapsed = time.time() - start
 
@@ -236,8 +254,9 @@ class OllamaClient:
                     self.stats.errors += 1
                     last_error = r.text
                     if attempt < self.max_retries:
-                        log.warning("Generate failed (attempt %d), retrying: %s", attempt + 1, r.text[:100])
-                        time.sleep(1)
+                        delay = self._backoff_delay(attempt)
+                        log.warning("Generate failed (attempt %d), retrying in %.1fs: %s", attempt + 1, delay, r.text[:100])
+                        time.sleep(delay)
                         continue
                     return {"response": "", "tokens": 0, "time_s": elapsed, "tokens_per_sec": 0, "error": r.text}
 
@@ -260,15 +279,18 @@ class OllamaClient:
                 self.stats.errors += 1
                 last_error = "timeout"
                 if attempt < self.max_retries:
-                    log.warning("Generate timed out (attempt %d), retrying", attempt + 1)
+                    delay = self._backoff_delay(attempt)
+                    log.warning("Generate timed out (attempt %d), retrying in %.1fs", attempt + 1, delay)
+                    time.sleep(delay)
                     continue
                 return {"response": "", "tokens": 0, "time_s": time.time() - start, "tokens_per_sec": 0, "error": "timeout"}
             except (requests.ConnectionError, requests.exceptions.RequestException, OSError) as e:
                 self.stats.errors += 1
                 last_error = str(e)
                 if attempt < self.max_retries:
-                    log.warning("Generate error (attempt %d), retrying: %s", attempt + 1, e)
-                    time.sleep(1)
+                    delay = self._backoff_delay(attempt)
+                    log.warning("Generate error (attempt %d), retrying in %.1fs: %s", attempt + 1, delay, e)
+                    time.sleep(delay)
                     continue
                 return {"response": "", "tokens": 0, "time_s": 0, "tokens_per_sec": 0, "error": str(e)}
 
@@ -329,10 +351,10 @@ class OllamaClient:
         for attempt in range(1 + self.max_retries):
             start = time.time()
             try:
-                r = self._session.post(
+                r = self._get_session().post(
                     f"{self.base_url}/api/chat",
                     json=payload,
-                    timeout=timeout,
+                    timeout=(5, timeout),
                 )
                 elapsed = time.time() - start
 
@@ -340,8 +362,9 @@ class OllamaClient:
                     self.stats.errors += 1
                     last_error = r.text
                     if attempt < self.max_retries:
-                        log.warning("Chat failed (attempt %d), retrying: %s", attempt + 1, r.text[:100])
-                        time.sleep(1)
+                        delay = self._backoff_delay(attempt)
+                        log.warning("Chat failed (attempt %d), retrying in %.1fs: %s", attempt + 1, delay, r.text[:100])
+                        time.sleep(delay)
                         continue
                     return {"response": "", "tokens": 0, "time_s": elapsed, "error": r.text}
 
@@ -370,15 +393,18 @@ class OllamaClient:
                 self.stats.errors += 1
                 last_error = "timeout"
                 if attempt < self.max_retries:
-                    log.warning("Chat timed out (attempt %d), retrying", attempt + 1)
+                    delay = self._backoff_delay(attempt)
+                    log.warning("Chat timed out (attempt %d), retrying in %.1fs", attempt + 1, delay)
+                    time.sleep(delay)
                     continue
                 return {"response": "", "tokens": 0, "time_s": time.time() - start, "error": "timeout"}
             except (requests.ConnectionError, requests.exceptions.RequestException, OSError) as e:
                 self.stats.errors += 1
                 last_error = str(e)
                 if attempt < self.max_retries:
-                    log.warning("Chat error (attempt %d), retrying: %s", attempt + 1, e)
-                    time.sleep(1)
+                    delay = self._backoff_delay(attempt)
+                    log.warning("Chat error (attempt %d), retrying in %.1fs: %s", attempt + 1, delay, e)
+                    time.sleep(delay)
                     continue
                 return {"response": "", "tokens": 0, "time_s": 0, "error": str(e)}
 
@@ -423,11 +449,11 @@ class OllamaClient:
         for attempt in range(1 + self.max_retries):
             start = time.time()
             try:
-                r = self._session.post(
+                r = self._get_session().post(
                     f"{self.base_url}/api/chat",
                     json=payload,
                     stream=True,
-                    timeout=timeout,
+                    timeout=(5, timeout),
                 )
                 for line in r.iter_lines():
                     if line:
@@ -462,8 +488,9 @@ class OllamaClient:
             except (requests.ConnectionError, requests.Timeout, OSError) as e:
                 self.stats.errors += 1
                 if attempt < self.max_retries:
-                    log.warning("Stream chat error (attempt %d), retrying: %s", attempt + 1, e)
-                    time.sleep(1)
+                    delay = self._backoff_delay(attempt)
+                    log.warning("Stream chat error (attempt %d), retrying in %.1fs: %s", attempt + 1, delay, e)
+                    time.sleep(delay)
                     continue
                 yield {"type": "error", "error": str(e)}
 
@@ -473,7 +500,7 @@ class OllamaClient:
         Useful for checking if a model supports vision, tools, etc.
         """
         try:
-            r = self._session.post(
+            r = self._get_session().post(
                 f"{self.base_url}/api/show",
                 json={"name": model or self.model},
                 timeout=10,
@@ -501,7 +528,7 @@ class OllamaClient:
             },
         }
         try:
-            r = self._session.post(
+            r = self._get_session().post(
                 f"{self.base_url}/api/generate",
                 json=payload,
                 timeout=60,

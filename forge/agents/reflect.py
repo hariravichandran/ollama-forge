@@ -26,7 +26,33 @@ from forge.utils.logging import get_logger
 
 log = get_logger("agents.reflect")
 
-REVIEW_PROMPT = """Review this response for quality. Check for:
+REVIEW_PROMPT_SHORT = """Review this short response for accuracy and completeness.
+
+User's question: {question}
+
+Agent's response:
+{response}
+
+If the response is good, reply with exactly: LGTM
+If there are issues, describe them briefly.
+"""
+
+REVIEW_PROMPT_CODE = """Review this response containing code. Check for:
+1. Syntax errors, typos, or logic bugs
+2. Missing imports or undefined variables
+3. Edge cases not handled
+4. Whether the code actually solves the stated problem
+
+User's question: {question}
+
+Agent's response:
+{response}
+
+If the response is good, reply with exactly: LGTM
+If there are issues, describe them briefly and provide a corrected version.
+"""
+
+REVIEW_PROMPT_GENERAL = """Review this response for quality. Check for:
 1. Factual accuracy — are statements correct?
 2. Completeness — does it fully answer the question?
 3. Code correctness — are there bugs, syntax errors, or logic issues?
@@ -74,6 +100,7 @@ class ReflectiveAgent(BaseAgent):
         self.max_revisions = max_revisions
         self._review_count = 0
         self._revision_count = 0
+        self._issue_categories: dict[str, int] = {}  # tracks issue types found
 
     def chat(self, user_message: str) -> str:
         """Chat with self-reflection on the response."""
@@ -97,11 +124,42 @@ class ReflectiveAgent(BaseAgent):
 
         return response
 
+    def _select_review_prompt(self, response: str) -> str:
+        """Select the most appropriate review prompt based on response content."""
+        # Check for code content
+        if "```" in response or "def " in response or "class " in response:
+            return REVIEW_PROMPT_CODE
+        # Short responses get a simpler review
+        if len(response) < 200:
+            return REVIEW_PROMPT_SHORT
+        return REVIEW_PROMPT_GENERAL
+
+    @staticmethod
+    def _categorize_issues(review_text: str) -> list[str]:
+        """Extract issue categories from review text."""
+        import re
+        categories = []
+        text_lower = review_text.lower()
+        if re.search(r"(incorrect|wrong|inaccurat|factual|false)", text_lower):
+            categories.append("factual")
+        if re.search(r"(incomplete|missing|doesn.t address|partial)", text_lower):
+            categories.append("completeness")
+        if re.search(r"(bug|syntax|error|typo|undefined|import)", text_lower):
+            categories.append("code_error")
+        if re.search(r"(unclear|confusing|hard to follow|readab)", text_lower):
+            categories.append("clarity")
+        return categories or ["general"]
+
     def _review_and_revise(self, question: str, response: str) -> str:
-        """Review a response and revise if needed."""
+        """Review a response and revise if needed.
+
+        Selects an appropriate review prompt based on response content
+        and categorizes any issues found for tracking.
+        """
         self._review_count += 1
 
-        review_prompt = REVIEW_PROMPT.format(
+        prompt_template = self._select_review_prompt(response)
+        review_prompt = prompt_template.format(
             question=question[:500],
             response=response[:2000],
         )
@@ -123,16 +181,22 @@ class ReflectiveAgent(BaseAgent):
             log.debug("Self-review: LGTM (no changes needed)")
             return response
 
+        # Categorize the issues found
+        categories = self._categorize_issues(review_text)
+        for cat in categories:
+            self._issue_categories[cat] = self._issue_categories.get(cat, 0) + 1
+
         # Review found issues — the review_text contains the correction
-        log.info("Self-review found issues, revising response")
+        log.info("Self-review found issues (%s), revising response", ", ".join(categories))
         self._revision_count += 1
 
-        # Generate a revised response incorporating the review feedback
+        # Generate a revised response with targeted feedback
         revised_result = self.client.generate(
             prompt=(
                 f"Original question: {question[:500]}\n\n"
-                f"Your initial answer had these issues:\n{review_text[:500]}\n\n"
-                f"Please provide a corrected, complete answer."
+                f"Your initial answer had these issues ({', '.join(categories)}):\n"
+                f"{review_text[:500]}\n\n"
+                f"Please provide a corrected, complete answer addressing all issues."
             ),
             system=self._system_prompt,
             temperature=self.config.temperature,
@@ -141,7 +205,7 @@ class ReflectiveAgent(BaseAgent):
         return revised_result.get("response", response)
 
     def get_stats(self) -> dict[str, Any]:
-        """Get stats including reflection metrics."""
+        """Get stats including reflection metrics and issue categories."""
         stats = super().get_stats()
         stats["reflection"] = {
             "reviews": self._review_count,
@@ -149,5 +213,6 @@ class ReflectiveAgent(BaseAgent):
             "revision_rate": (
                 round(self._revision_count / max(1, self._review_count), 2)
             ),
+            "issue_categories": dict(self._issue_categories),
         }
         return stats

@@ -56,6 +56,13 @@ class ContextCompressor:
         self.keep_recent = keep_recent
         self._summary_cache: str = ""
         self._summarized_up_to: int = 0  # index of last summarized message
+        # Compression statistics for observability
+        self._compression_stats = {
+            "compressions": 0,
+            "total_input_tokens": 0,
+            "total_output_tokens": 0,
+            "extractive_fallbacks": 0,
+        }
 
     def estimate_tokens(self, messages: list[dict[str, str]]) -> int:
         """Estimate token count for a message list."""
@@ -76,12 +83,21 @@ class ContextCompressor:
         if not self.needs_compression(messages):
             return messages
 
+        input_tokens = self.estimate_tokens(messages)
+
         if self.strategy == "truncate":
-            return self._truncate(messages)
+            result = self._truncate(messages)
         elif self.strategy == "progressive":
-            return self._progressive_compress(messages)
+            result = self._progressive_compress(messages)
         else:
-            return self._sliding_summary(messages)
+            result = self._sliding_summary(messages)
+
+        output_tokens = self.estimate_tokens(result)
+        self._compression_stats["compressions"] += 1
+        self._compression_stats["total_input_tokens"] += input_tokens
+        self._compression_stats["total_output_tokens"] += output_tokens
+
+        return result
 
     def _sliding_summary(self, messages: list[dict[str, str]]) -> list[dict[str, str]]:
         """Summarize older messages, keep recent ones verbatim."""
@@ -208,6 +224,7 @@ class ContextCompressor:
             log.warning("LLM summarization failed (%s), using extractive fallback", e)
 
         # Extractive fallback: keep lines with code, paths, decisions, errors
+        self._compression_stats["extractive_fallbacks"] += 1
         return self._extractive_summary(text)
 
     def _extractive_summary(self, text: str) -> str:
@@ -263,6 +280,19 @@ class ContextCompressor:
         be re-injected after summarization to prevent the LLM from mangling them.
         """
         return re.findall(r"```[\s\S]*?```", text)
+
+    def get_stats(self) -> dict[str, Any]:
+        """Get compression statistics for observability."""
+        stats = dict(self._compression_stats)
+        if stats["compressions"] > 0:
+            total_in = stats["total_input_tokens"]
+            total_out = stats["total_output_tokens"]
+            stats["avg_compression_ratio"] = round(
+                total_out / max(1, total_in), 2
+            )
+        else:
+            stats["avg_compression_ratio"] = 1.0
+        return stats
 
     def reset(self) -> None:
         """Clear cached summaries (e.g., for a new conversation)."""

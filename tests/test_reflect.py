@@ -5,7 +5,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from forge.agents.base import AgentConfig
-from forge.agents.reflect import ReflectiveAgent, REVIEW_PROMPT
+from forge.agents.reflect import ReflectiveAgent, REVIEW_PROMPT_GENERAL as REVIEW_PROMPT
 
 
 class MockClient:
