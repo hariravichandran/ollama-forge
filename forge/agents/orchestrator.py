@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import json
+import os
+import tempfile
 from pathlib import Path
 from typing import Any
 
@@ -13,6 +15,16 @@ from forge.llm.client import OllamaClient
 from forge.utils.logging import get_logger
 
 log = get_logger("agents.orchestrator")
+
+# Built-in agent names that cannot be overwritten by user agents
+BUILTIN_AGENT_NAMES = {"assistant", "coder", "researcher"}
+
+# Reserved names that cannot be used for agents (conflict with commands/system)
+RESERVED_NAMES = {"system", "help", "quit", "exit", "agent", "agents", "model", "models",
+                  "mcp", "tools", "config", "status", "stats", "clear", "reset"}
+
+# Maximum agent name length
+MAX_AGENT_NAME_LENGTH = 50
 
 
 class AgentOrchestrator:
@@ -154,15 +166,18 @@ class AgentOrchestrator:
         """Create a new agent from parameters.
 
         Validates inputs before creating. If save=True, writes a YAML
-        definition to the agents/ directory.
+        definition to the agents/ directory using atomic write.
         """
         # Validate inputs
         errors = self._validate_agent_params(name, description, system_prompt, tools, temperature)
         if errors:
             return f"Cannot create agent: {'; '.join(errors)}"
 
-        if name in self.agents:
-            return f"Agent '{name}' already exists. Choose a different name."
+        # Case-insensitive duplicate check
+        lower_existing = {k.lower() for k in self.agents}
+        if name.lower() in lower_existing:
+            existing = next(k for k in self.agents if k.lower() == name.lower())
+            return f"Agent '{existing}' already exists (case-insensitive match). Choose a different name."
 
         config = AgentConfig(
             name=name,
@@ -173,10 +188,7 @@ class AgentOrchestrator:
             description=description,
         )
 
-        agent = BaseAgent(client=self.client, config=config, working_dir=self.working_dir)
-        self.register_agent(agent)
-
-        # Save to YAML
+        # Atomic: save YAML first (if requested), then register
         if save:
             agents_dir = Path(self.working_dir) / "agents"
             agents_dir.mkdir(exist_ok=True)
@@ -190,8 +202,22 @@ class AgentOrchestrator:
                 "temperature": temperature,
                 "max_context": config.max_context,
             }
-            with open(yaml_path, "w") as f:
-                yaml.dump(data, f, default_flow_style=False, sort_keys=False)
+            # Atomic write: write to temp file then rename
+            try:
+                fd, tmp_path = tempfile.mkstemp(dir=str(agents_dir), suffix=".yaml.tmp")
+                with os.fdopen(fd, "w") as f:
+                    yaml.dump(data, f, default_flow_style=False, sort_keys=False)
+                os.replace(tmp_path, str(yaml_path))
+            except OSError as e:
+                # Clean up temp file if rename failed
+                if os.path.exists(tmp_path):
+                    os.unlink(tmp_path)
+                return f"Cannot create agent: failed to save YAML ({e})"
+
+        agent = BaseAgent(client=self.client, config=config, working_dir=self.working_dir)
+        self.register_agent(agent)
+
+        if save:
             log.info("Created agent '%s' and saved to %s", name, yaml_path)
             return f"Agent '{name}' created and saved to {yaml_path}"
 
@@ -248,6 +274,12 @@ class AgentOrchestrator:
             errors.append("name cannot be empty")
         elif not name.replace("-", "").replace("_", "").isalnum():
             errors.append("name must be alphanumeric (hyphens and underscores allowed)")
+        elif len(name) > MAX_AGENT_NAME_LENGTH:
+            errors.append(f"name must be at most {MAX_AGENT_NAME_LENGTH} characters")
+        elif name.lower() in RESERVED_NAMES:
+            errors.append(f"'{name}' is a reserved name and cannot be used for agents")
+        elif name.lower() in BUILTIN_AGENT_NAMES:
+            errors.append(f"'{name}' is a built-in agent name and cannot be overwritten")
 
         if not system_prompt or not system_prompt.strip():
             errors.append("system_prompt cannot be empty")

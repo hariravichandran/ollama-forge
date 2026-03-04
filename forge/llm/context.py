@@ -65,8 +65,11 @@ class ContextCompressor:
         }
 
     def estimate_tokens(self, messages: list[dict[str, str]]) -> int:
-        """Estimate token count for a message list."""
-        total_chars = sum(len(m.get("content", "")) for m in messages)
+        """Estimate token count for a message list.
+
+        Handles None content gracefully — treats as empty string.
+        """
+        total_chars = sum(len(m.get("content") or "") for m in messages)
         # Add overhead for role markers and formatting
         overhead = len(messages) * 10
         return int((total_chars + overhead) / CHARS_PER_TOKEN)
@@ -75,11 +78,33 @@ class ContextCompressor:
         """Check if messages exceed the token budget."""
         return self.estimate_tokens(messages) > self.max_tokens * 0.85
 
+    @staticmethod
+    def validate_messages(messages: list[dict[str, str]]) -> list[dict[str, str]]:
+        """Validate and sanitize messages, fixing common issues.
+
+        - Ensures every message has a 'role' field
+        - Replaces None content with empty string
+        - Removes messages with no role
+        """
+        cleaned = []
+        for msg in messages:
+            if not isinstance(msg, dict):
+                continue
+            if "role" not in msg:
+                continue
+            # Ensure content is always a string (never None)
+            if msg.get("content") is None:
+                msg = dict(msg, content="")
+            cleaned.append(msg)
+        return cleaned
+
     def compress(self, messages: list[dict[str, str]]) -> list[dict[str, str]]:
         """Compress message history to fit within max_tokens.
 
         Returns a new message list with older messages summarized.
+        Validates messages before processing.
         """
+        messages = self.validate_messages(messages)
         if not self.needs_compression(messages):
             return messages
 
@@ -268,7 +293,7 @@ class ContextCompressor:
         lines = []
         for msg in messages:
             role = msg.get("role", "user")
-            content = msg.get("content", "")
+            content = msg.get("content") or ""
             lines.append(f"[{role}]: {content}")
         return "\n\n".join(lines)
 

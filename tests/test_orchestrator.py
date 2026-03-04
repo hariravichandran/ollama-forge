@@ -114,7 +114,8 @@ class TestCreateAgent:
             description="Duplicate",
             system_prompt="test",
         )
-        assert "already exists" in result
+        # Built-in names are rejected by validation (either as built-in or duplicate)
+        assert "cannot" in result.lower() or "already exists" in result.lower()
 
     def test_create_agent_custom_config(self, client):
         with tempfile.TemporaryDirectory() as tmpdir:

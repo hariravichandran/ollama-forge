@@ -2,10 +2,13 @@
 
 from __future__ import annotations
 
+import ipaddress
 import json
+import re
 import time
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlparse
 
 from forge.utils.logging import get_logger
 
@@ -17,6 +20,21 @@ RETRY_BACKOFF_BASE = 1.5  # seconds — exponential backoff: 1.5, 2.25, 3.375...
 
 # Transient HTTP status codes that warrant a retry
 RETRYABLE_STATUS_CODES = {429, 500, 502, 503, 504}
+
+# URL safety: allowed schemes
+ALLOWED_URL_SCHEMES = {"http", "https"}
+
+# URL safety: blocked hostnames (internal/local)
+BLOCKED_HOSTS = {"localhost", "127.0.0.1", "0.0.0.0", "[::1]"}
+
+# Maximum redirects to follow
+MAX_REDIRECTS = 5
+
+# Maximum response body size (5 MB)
+MAX_RESPONSE_BYTES = 5 * 1024 * 1024
+
+# Rate limiting: minimum seconds between requests to the same domain
+RATE_LIMIT_SECONDS = 2.0
 
 
 class WebTool:
@@ -34,6 +52,8 @@ class WebTool:
         self._cache: dict[str, Any] = self._load_cache()
         # Persistent HTTP session for connection reuse
         self._http_session: Any = None
+        # Rate limiting: track last request time per domain
+        self._domain_last_request: dict[str, float] = {}
 
     def get_tool_definitions(self) -> list[dict[str, Any]]:
         """Return Ollama tool-calling definitions."""
@@ -130,6 +150,14 @@ class WebTool:
         if not url:
             return "Error: empty URL"
 
+        # Validate URL safety
+        url_error = self._validate_url(url)
+        if url_error:
+            return url_error
+
+        # Rate limiting per domain
+        self._apply_rate_limit(url)
+
         # Check cache
         cache_key = f"fetch:{url}"
         cached = self._get_cached(cache_key)
@@ -143,11 +171,13 @@ class WebTool:
                 if self._http_session is None:
                     self._http_session = requests.Session()
                     self._http_session.headers["User-Agent"] = "ollama-forge/0.1 (local AI assistant)"
-                r = self._http_session.get(url, timeout=15)
+                    self._http_session.max_redirects = MAX_REDIRECTS
+                r = self._http_session.get(url, timeout=15, stream=True)
 
                 # Retry on transient HTTP errors
                 if r.status_code in RETRYABLE_STATUS_CODES:
                     last_error = f"HTTP {r.status_code}"
+                    r.close()
                     if attempt < MAX_RETRIES - 1:
                         delay = RETRY_BACKOFF_BASE ** (attempt + 1)
                         log.warning("Fetch got HTTP %d (attempt %d), retrying in %.1fs", r.status_code, attempt + 1, delay)
@@ -156,9 +186,19 @@ class WebTool:
 
                 r.raise_for_status()
 
-                # Simple HTML to text extraction
-                content = r.text
-                if "<html" in content.lower():
+                # Check Content-Length before reading full body
+                content_length = r.headers.get("Content-Length")
+                if content_length and int(content_length) > MAX_RESPONSE_BYTES:
+                    r.close()
+                    return f"Error: response too large ({int(content_length)} bytes, max {MAX_RESPONSE_BYTES})"
+
+                # Read with size limit
+                content = r.text[:MAX_RESPONSE_BYTES]
+                r.close()
+
+                # Check Content-Type for HTML detection (more reliable than content sniffing)
+                content_type = r.headers.get("Content-Type", "").lower()
+                if "text/html" in content_type or "<html" in content[:500].lower():
                     content = self._html_to_text(content)
 
                 # Truncate long content
@@ -178,6 +218,51 @@ class WebTool:
                     log.error("Fetch failed after %d attempts: %s", MAX_RETRIES, e)
 
         return f"Fetch error (after {MAX_RETRIES} attempts): {last_error}"
+
+    @staticmethod
+    def _validate_url(url: str) -> str:
+        """Validate a URL for safety. Returns error message or empty string if valid."""
+        try:
+            parsed = urlparse(url)
+        except Exception:
+            return "Error: malformed URL"
+
+        # Check scheme
+        if parsed.scheme not in ALLOWED_URL_SCHEMES:
+            return f"Error: URL scheme '{parsed.scheme}' not allowed (use http or https)"
+
+        if not parsed.hostname:
+            return "Error: URL has no hostname"
+
+        hostname = parsed.hostname.lower()
+
+        # Block known internal hostnames
+        if hostname in BLOCKED_HOSTS:
+            return f"Error: cannot fetch from internal host '{hostname}'"
+
+        # Block private/reserved IP ranges
+        try:
+            addr = ipaddress.ip_address(hostname)
+            if addr.is_private or addr.is_loopback or addr.is_reserved or addr.is_link_local:
+                return f"Error: cannot fetch from private/reserved IP '{hostname}'"
+        except ValueError:
+            pass  # Not an IP literal — hostname is fine
+
+        return ""
+
+    def _apply_rate_limit(self, url: str) -> None:
+        """Apply per-domain rate limiting to avoid hammering servers."""
+        try:
+            domain = urlparse(url).hostname or ""
+        except Exception:
+            return
+        now = time.time()
+        last = self._domain_last_request.get(domain, 0)
+        wait = RATE_LIMIT_SECONDS - (now - last)
+        if wait > 0:
+            log.debug("Rate limiting %s: waiting %.1fs", domain, wait)
+            time.sleep(wait)
+        self._domain_last_request[domain] = time.time()
 
     def _html_to_text(self, html: str) -> str:
         """Basic HTML to text conversion."""
