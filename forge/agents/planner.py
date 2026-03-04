@@ -133,12 +133,77 @@ class EditPlanner:
 
         return plan
 
+    def validate(self, plan: EditPlan) -> list[str]:
+        """Validate an edit plan before execution.
+
+        Returns a list of validation errors (empty = valid).
+        Checks:
+        - Files to edit exist (unless create=True)
+        - old_string values are found in the file content
+        - No overlapping edits (same old_string targeted twice)
+        - File paths are within the working directory
+        """
+        errors: list[str] = []
+
+        for file_edit in plan.files:
+            file_path = self.working_dir / file_edit.path
+
+            # Path traversal check
+            try:
+                resolved = file_path.resolve()
+                if not str(resolved).startswith(str(self.working_dir.resolve())):
+                    errors.append(f"{file_edit.path}: path escapes working directory")
+                    continue
+            except (OSError, ValueError):
+                errors.append(f"{file_edit.path}: invalid path")
+                continue
+
+            if file_edit.create:
+                if file_path.exists():
+                    errors.append(f"{file_edit.path}: file already exists (marked as create)")
+                continue
+
+            if not file_path.exists():
+                errors.append(f"{file_edit.path}: file not found")
+                continue
+
+            content = file_path.read_text()
+            seen_old_strings: set[str] = set()
+
+            for i, edit in enumerate(file_edit.edits):
+                old = edit.get("old_string", "")
+                if not old:
+                    errors.append(f"{file_edit.path} edit {i + 1}: empty old_string")
+                    continue
+
+                if old not in content:
+                    snippet = old[:60].replace("\n", "\\n")
+                    errors.append(f"{file_edit.path} edit {i + 1}: old_string not found: '{snippet}...'")
+
+                if old in seen_old_strings:
+                    errors.append(f"{file_edit.path} edit {i + 1}: duplicate old_string (overlapping edit)")
+                seen_old_strings.add(old)
+
+                if content.count(old) > 1:
+                    errors.append(f"{file_edit.path} edit {i + 1}: old_string matches {content.count(old)} locations (ambiguous)")
+
+        return errors
+
     def execute(self, plan: EditPlan) -> PlanResult:
         """Execute an edit plan with atomic rollback.
 
         All edits succeed, or all are rolled back.
+        Validates the plan first — returns errors without modifying files if invalid.
         """
         result = PlanResult(success=True)
+
+        # Validate before executing
+        validation_errors = self.validate(plan)
+        if validation_errors:
+            result.success = False
+            result.errors = validation_errors
+            log.error("Plan validation failed with %d errors", len(validation_errors))
+            return result
 
         # Save state for rollback
         backups: dict[str, str] = {}

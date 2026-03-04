@@ -11,6 +11,13 @@ from forge.utils.logging import get_logger
 
 log = get_logger("tools.web")
 
+# Retry configuration for transient network errors
+MAX_RETRIES = 3
+RETRY_BACKOFF_BASE = 1.5  # seconds — exponential backoff: 1.5, 2.25, 3.375...
+
+# Transient HTTP status codes that warrant a retry
+RETRYABLE_STATUS_CODES = {429, 500, 502, 503, 504}
+
 
 class WebTool:
     """Web search and fetch operations."""
@@ -71,7 +78,7 @@ class WebTool:
         return f"Unknown function: {function_name}"
 
     def _search(self, query: str, max_results: int = 5) -> str:
-        """Search the web using DuckDuckGo."""
+        """Search the web using DuckDuckGo with retry on transient failures."""
         if not query:
             return "Error: empty search query"
 
@@ -81,36 +88,45 @@ class WebTool:
         if cached:
             return cached
 
-        try:
-            from duckduckgo_search import DDGS
-            with DDGS() as ddgs:
-                results = list(ddgs.text(query, max_results=max_results))
+        last_error = ""
+        for attempt in range(MAX_RETRIES):
+            try:
+                from duckduckgo_search import DDGS
+                with DDGS() as ddgs:
+                    results = list(ddgs.text(query, max_results=max_results))
 
-            if not results:
-                return f"No results found for: {query}"
+                if not results:
+                    return f"No results found for: {query}"
 
-            lines = [f"Search results for: {query}\n"]
-            for r in results:
-                title = r.get("title", "")
-                href = r.get("href", "")
-                body = r.get("body", "")
-                lines.append(f"  {title}")
-                lines.append(f"  {href}")
-                lines.append(f"  {body}")
-                lines.append("")
+                lines = [f"Search results for: {query}\n"]
+                for r in results:
+                    title = r.get("title", "")
+                    href = r.get("href", "")
+                    body = r.get("body", "")
+                    lines.append(f"  {title}")
+                    lines.append(f"  {href}")
+                    lines.append(f"  {body}")
+                    lines.append("")
 
-            output = "\n".join(lines)
-            self._set_cached(cache_key, output)
-            return output
+                output = "\n".join(lines)
+                self._set_cached(cache_key, output)
+                return output
 
-        except ImportError:
-            return "Error: duckduckgo-search not installed. Run: pip install duckduckgo-search"
-        except Exception as e:
-            log.error("Web search error: %s", e)
-            return f"Search error: {e}"
+            except ImportError:
+                return "Error: duckduckgo-search not installed. Run: pip install duckduckgo-search"
+            except Exception as e:
+                last_error = str(e)
+                if attempt < MAX_RETRIES - 1:
+                    delay = RETRY_BACKOFF_BASE ** (attempt + 1)
+                    log.warning("Search attempt %d failed (%s), retrying in %.1fs", attempt + 1, e, delay)
+                    time.sleep(delay)
+                else:
+                    log.error("Search failed after %d attempts: %s", MAX_RETRIES, e)
+
+        return f"Search error (after {MAX_RETRIES} attempts): {last_error}"
 
     def _fetch(self, url: str) -> str:
-        """Fetch text content from a URL."""
+        """Fetch text content from a URL with retry on transient failures."""
         if not url:
             return "Error: empty URL"
 
@@ -120,28 +136,48 @@ class WebTool:
         if cached:
             return cached
 
-        try:
-            import requests
-            if self._http_session is None:
-                self._http_session = requests.Session()
-                self._http_session.headers["User-Agent"] = "ollama-forge/0.1 (local AI assistant)"
-            r = self._http_session.get(url, timeout=15)
-            r.raise_for_status()
+        last_error = ""
+        for attempt in range(MAX_RETRIES):
+            try:
+                import requests
+                if self._http_session is None:
+                    self._http_session = requests.Session()
+                    self._http_session.headers["User-Agent"] = "ollama-forge/0.1 (local AI assistant)"
+                r = self._http_session.get(url, timeout=15)
 
-            # Simple HTML to text extraction
-            content = r.text
-            if "<html" in content.lower():
-                content = self._html_to_text(content)
+                # Retry on transient HTTP errors
+                if r.status_code in RETRYABLE_STATUS_CODES:
+                    last_error = f"HTTP {r.status_code}"
+                    if attempt < MAX_RETRIES - 1:
+                        delay = RETRY_BACKOFF_BASE ** (attempt + 1)
+                        log.warning("Fetch got HTTP %d (attempt %d), retrying in %.1fs", r.status_code, attempt + 1, delay)
+                        time.sleep(delay)
+                        continue
 
-            # Truncate long content
-            if len(content) > 15000:
-                content = content[:15000] + "\n... (truncated)"
+                r.raise_for_status()
 
-            self._set_cached(cache_key, content)
-            return content
+                # Simple HTML to text extraction
+                content = r.text
+                if "<html" in content.lower():
+                    content = self._html_to_text(content)
 
-        except Exception as e:
-            return f"Fetch error: {e}"
+                # Truncate long content
+                if len(content) > 15000:
+                    content = content[:15000] + "\n... (truncated)"
+
+                self._set_cached(cache_key, content)
+                return content
+
+            except Exception as e:
+                last_error = str(e)
+                if attempt < MAX_RETRIES - 1:
+                    delay = RETRY_BACKOFF_BASE ** (attempt + 1)
+                    log.warning("Fetch attempt %d failed (%s), retrying in %.1fs", attempt + 1, e, delay)
+                    time.sleep(delay)
+                else:
+                    log.error("Fetch failed after %d attempts: %s", MAX_RETRIES, e)
+
+        return f"Fetch error (after {MAX_RETRIES} attempts): {last_error}"
 
     def _html_to_text(self, html: str) -> str:
         """Basic HTML to text conversion."""

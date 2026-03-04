@@ -237,8 +237,10 @@ class TestRollback:
             )
             result = planner.execute(plan)
             assert not result.success
-            assert result.rolled_back
-            # a.py should be restored to original
+            # Validation catches the missing string before execution,
+            # so no files are modified and no rollback is needed
+            assert not result.rolled_back
+            # a.py should be untouched (validation prevented changes)
             assert (Path(tmpdir) / "a.py").read_text() == "original_a\n"
 
     def test_rollback_on_missing_file(self):

@@ -34,8 +34,16 @@ def main(ctx):
 @click.option("--cascade", is_flag=True, help="Enable cascading: auto-switch to bigger model when stuck")
 @click.option("--auto-approve", is_flag=True, help="Auto-approve all tool actions (skip permission prompts)")
 @click.option("--image", "-i", multiple=True, help="Image file(s) to include (for vision models)")
-def chat(model: str, agent: str, working_dir: str, cascade: bool, auto_approve: bool, image: tuple):
-    """Start an interactive chat session."""
+@click.option("--input", "input_file", default="", help="Read prompts from file (one per line) for batch mode")
+@click.option("--no-stream", is_flag=True, help="Disable streaming output (useful for scripting/pipes)")
+def chat(model: str, agent: str, working_dir: str, cascade: bool, auto_approve: bool, image: tuple,
+         input_file: str, no_stream: bool):
+    """Start an interactive chat session.
+
+    \b
+    Batch mode: Use --input to process prompts from a file:
+        forge chat --input prompts.txt --no-stream > output.txt
+    """
     from forge.config import load_config
     from forge.hardware import detect_hardware, select_profile
     from forge.hardware.rocm import configure_rocm_env
@@ -89,6 +97,35 @@ def chat(model: str, agent: str, working_dir: str, cascade: bool, auto_approve: 
             console.print(f"[dim]Cascade: {cc.primary_model} → {cc.escalation_model}[/dim]")
         else:
             console.print("[dim]Cascade: no escalation model available for your hardware[/dim]")
+
+    # ─── Batch mode ───────────────────────────────────────────────
+    if input_file:
+        from pathlib import Path
+        input_path = Path(input_file)
+        if not input_path.exists():
+            console.print(f"[red]Input file not found: {input_file}[/red]")
+            sys.exit(1)
+
+        prompts = [line.strip() for line in input_path.read_text().splitlines() if line.strip()]
+        if not prompts:
+            console.print("[yellow]Input file is empty.[/yellow]")
+            return
+
+        for idx, prompt in enumerate(prompts, 1):
+            if not no_stream:
+                console.print(f"\n[bold blue]Prompt {idx}/{len(prompts)}>[/bold blue] {prompt}")
+            response = orchestrator.chat(prompt)
+            if no_stream:
+                # Clean output for piping
+                print(response)
+            else:
+                console.print(f"\n[bold green]Agent>[/bold green] {response}")
+
+        if not no_stream:
+            console.print(f"\n[dim]Processed {len(prompts)} prompts.[/dim]")
+        return
+
+    # ─── Interactive mode ─────────────────────────────────────────
 
     # Print welcome
     memory_status = f"  Memory: {len(memory._facts)} facts" if memory._facts else ""
@@ -1462,6 +1499,89 @@ def compare(prompt: str, models: tuple, temperature: float):
             str(len(r["response"])),
         )
     console.print(table)
+
+
+# ─── Tools ──────────────────────────────────────────────────────────────
+
+
+@main.group(invoke_without_command=True)
+@click.pass_context
+def tools(ctx):
+    """List and inspect built-in agent tools."""
+    if ctx.invoked_subcommand is None:
+        ctx.invoke(tools_list)
+
+
+@tools.command("list")
+def tools_list():
+    """List all available built-in tools."""
+    from forge.tools import BUILTIN_TOOLS
+
+    table = Table(title="Built-in Tools")
+    table.add_column("Name", style="cyan")
+    table.add_column("Description")
+    table.add_column("Functions", justify="right")
+
+    for name, tool_cls in sorted(BUILTIN_TOOLS.items()):
+        desc = getattr(tool_cls, "description", "")
+        # Count functions by instantiating minimally
+        try:
+            instance = tool_cls.__new__(tool_cls)
+            if hasattr(instance, "get_tool_definitions"):
+                # Some tools need working_dir — try with default
+                real_instance = tool_cls(working_dir="/tmp")
+                func_count = len(real_instance.get_tool_definitions())
+            else:
+                func_count = 0
+        except Exception:
+            func_count = 0
+        table.add_row(name, desc, str(func_count))
+    console.print(table)
+
+
+@tools.command("info")
+@click.argument("tool_name")
+def tools_info(tool_name: str):
+    """Show detailed info about a specific tool, including its function signatures."""
+    from forge.tools import BUILTIN_TOOLS
+
+    if tool_name not in BUILTIN_TOOLS:
+        console.print(f"[red]Unknown tool: {tool_name}[/red]")
+        console.print(f"Available tools: {', '.join(sorted(BUILTIN_TOOLS.keys()))}")
+        return
+
+    tool_cls = BUILTIN_TOOLS[tool_name]
+    desc = getattr(tool_cls, "description", "No description")
+
+    console.print(f"\n[bold cyan]{tool_name}[/bold cyan] — {desc}\n")
+
+    try:
+        instance = tool_cls(working_dir="/tmp")
+        definitions = instance.get_tool_definitions()
+    except Exception as e:
+        console.print(f"[dim]Could not load tool definitions: {e}[/dim]")
+        return
+
+    table = Table(title=f"Functions ({len(definitions)})")
+    table.add_column("Function", style="green")
+    table.add_column("Description")
+    table.add_column("Parameters", style="dim")
+
+    for defn in definitions:
+        func = defn.get("function", {})
+        func_name = func.get("name", "?")
+        func_desc = func.get("description", "")
+        params = func.get("parameters", {}).get("properties", {})
+        required = func.get("parameters", {}).get("required", [])
+        param_strs = []
+        for p_name, p_info in params.items():
+            p_type = p_info.get("type", "any")
+            marker = "*" if p_name in required else ""
+            param_strs.append(f"{p_name}{marker}: {p_type}")
+        table.add_row(func_name, func_desc, ", ".join(param_strs) or "-")
+
+    console.print(table)
+    console.print("\n[dim]* = required parameter[/dim]")
 
 
 # ─── Config ──────────────────────────────────────────────────────────────

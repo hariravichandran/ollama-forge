@@ -513,18 +513,45 @@ class OllamaClient:
             pass
         return False
 
+    # Maximum image file size (20 MB) — prevents sending huge files to Ollama
+    MAX_IMAGE_SIZE = 20 * 1024 * 1024
+
+    # Supported image MIME types (by file extension)
+    SUPPORTED_IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".gif", ".bmp", ".webp"}
+
     def _inject_images(
         self, messages: list[dict[str, Any]], images: list[str],
     ) -> list[dict[str, Any]]:
         """Inject base64-encoded images into the last user message.
 
         Accepts file paths or raw base64 strings.
+        Validates file existence, size, and extension before encoding.
         """
         encoded = []
         for img in images:
-            if Path(img).exists():
+            img_path = Path(img)
+            if img_path.exists():
+                # Validate extension
+                if img_path.suffix.lower() not in self.SUPPORTED_IMAGE_EXTENSIONS:
+                    log.warning(
+                        "Skipping unsupported image type: %s (supported: %s)",
+                        img_path.suffix, ", ".join(sorted(self.SUPPORTED_IMAGE_EXTENSIONS)),
+                    )
+                    continue
+                # Validate size
+                file_size = img_path.stat().st_size
+                if file_size > self.MAX_IMAGE_SIZE:
+                    log.warning(
+                        "Skipping oversized image: %s (%.1f MB, max %.0f MB)",
+                        img_path.name, file_size / (1024 * 1024),
+                        self.MAX_IMAGE_SIZE / (1024 * 1024),
+                    )
+                    continue
+                if file_size == 0:
+                    log.warning("Skipping empty image file: %s", img_path.name)
+                    continue
                 # File path — read and encode
-                encoded.append(base64.b64encode(Path(img).read_bytes()).decode("utf-8"))
+                encoded.append(base64.b64encode(img_path.read_bytes()).decode("utf-8"))
             else:
                 # Assume already base64
                 encoded.append(img)

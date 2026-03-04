@@ -183,19 +183,68 @@ class ContextCompressor:
         return result
 
     def _ask_for_summary(self, text: str) -> str:
-        """Ask the LLM to summarize a conversation segment."""
+        """Ask the LLM to summarize a conversation segment.
+
+        Falls back to extractive summarization if the LLM is unavailable
+        or returns an error, ensuring compression always succeeds.
+        """
         # Truncate input if it's too long for the summary call itself
         max_input_chars = int(self.max_tokens * CHARS_PER_TOKEN * 0.6)
         if len(text) > max_input_chars:
             text = text[:max_input_chars] + "\n[... truncated for summary ...]"
 
-        result = self.client.generate(
-            prompt=f"Summarize this conversation history:\n\n{text}",
-            system=SUMMARY_SYSTEM_PROMPT,
-            timeout=60,
-            temperature=0.1,
-        )
-        return result.get("response", "").strip()
+        try:
+            result = self.client.generate(
+                prompt=f"Summarize this conversation history:\n\n{text}",
+                system=SUMMARY_SYSTEM_PROMPT,
+                timeout=60,
+                temperature=0.1,
+            )
+            response = result.get("response", "").strip()
+            if response and not result.get("error"):
+                return response
+            log.warning("LLM summarization returned empty/error, using extractive fallback")
+        except Exception as e:
+            log.warning("LLM summarization failed (%s), using extractive fallback", e)
+
+        # Extractive fallback: keep lines with code, paths, decisions, errors
+        return self._extractive_summary(text)
+
+    def _extractive_summary(self, text: str) -> str:
+        """Extract key information without LLM — used as fallback.
+
+        Keeps lines containing code blocks, file paths, errors, and decisions.
+        """
+        important_patterns = [
+            r"```",                  # code fences
+            r"[\w/]+\.\w{1,5}",     # file paths (e.g., src/main.py)
+            r"error|exception|fail|traceback",  # errors
+            r"decided|chose|selected|using|switched",  # decisions
+            r"todo|fixme|hack|note",  # annotations
+            r"https?://",            # URLs
+        ]
+        important_re = re.compile("|".join(important_patterns), re.IGNORECASE)
+
+        lines = text.splitlines()
+        kept: list[str] = []
+        in_code_block = False
+
+        for line in lines:
+            stripped = line.strip()
+            if stripped.startswith("```"):
+                in_code_block = not in_code_block
+                kept.append(line)
+            elif in_code_block:
+                kept.append(line)
+            elif important_re.search(stripped):
+                kept.append(line)
+
+        if not kept:
+            # Nothing important found — keep first and last portions
+            quarter = max(5, len(lines) // 4)
+            kept = lines[:quarter] + ["[... middle portion omitted ...]"] + lines[-quarter:]
+
+        return "\n".join(kept)
 
     def _format_messages(self, messages: list[dict[str, str]]) -> str:
         """Format messages into a readable string for summarization."""

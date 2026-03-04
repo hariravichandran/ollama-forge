@@ -45,6 +45,9 @@ class MockOllamaClient:
     def generate(self, prompt, system="", json_mode=False, temperature=0.7, timeout=300):
         return {"response": self._response, "tokens": 10, "time_s": 0.5}
 
+    def list_models(self):
+        return [{"name": self.model}, {"name": "test:14b"}]
+
     def switch_model(self, model_name):
         self._switched_to.append(model_name)
         self.model = model_name
@@ -1270,8 +1273,10 @@ class TestEditPlanner:
 
             result = planner.execute(plan)
             assert not result.success
-            assert result.rolled_back
-            # Original content should be restored
+            # Validation now catches the error before execution,
+            # so no files are modified and no rollback is needed
+            assert not result.rolled_back
+            # Original content should be untouched (validation prevented changes)
             assert "original content" in (Path(tmpdir) / "a.py").read_text()
 
     def test_create_new_file(self):

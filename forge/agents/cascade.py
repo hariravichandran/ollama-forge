@@ -121,9 +121,22 @@ class CascadeAgent(BaseAgent):
         return False
 
     def _escalate_and_retry(self, user_message: str) -> str:
-        """Switch to the larger model and retry the last message."""
+        """Switch to the larger model and retry the last message.
+
+        Checks model availability before escalating — if the escalation
+        model isn't available and can't be pulled, stays on the primary model.
+        """
         if not self._escalation_model:
             log.warning("No escalation model configured")
+            return self.messages[-1].get("content", "") if self.messages else ""
+
+        # Check if escalation model is available before switching
+        if not self._is_model_available(self._escalation_model):
+            log.warning(
+                "Escalation model %s not available — staying on %s",
+                self._escalation_model, self._primary_model,
+            )
+            self._consecutive_poor = 0  # Reset to avoid infinite escalation attempts
             return self.messages[-1].get("content", "") if self.messages else ""
 
         log.info("Escalating from %s to %s", self._primary_model, self._escalation_model)
@@ -138,6 +151,18 @@ class CascadeAgent(BaseAgent):
             self.messages.pop()
 
         return super().chat(user_message)
+
+    def _is_model_available(self, model: str) -> bool:
+        """Check if a model is locally available (without pulling)."""
+        try:
+            available = self.client.list_models()
+            available_names = {m.get("name", "") for m in available}
+            # Also check without tag (e.g., "qwen2.5-coder:7b" matches "qwen2.5-coder:7b")
+            available_bases = {n.split(":")[0] for n in available_names}
+            model_base = model.split(":")[0]
+            return model in available_names or model_base in available_bases
+        except Exception:
+            return False
 
     def _deescalate(self) -> None:
         """Return to the primary (smaller) model."""

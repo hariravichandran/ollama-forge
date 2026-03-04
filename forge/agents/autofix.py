@@ -154,6 +154,10 @@ class AutoFixer:
     ) -> AutoFixResult:
         """Run checks and attempt to fix errors.
 
+        Includes infinite loop protection: if the same error appears in
+        consecutive attempts, the loop breaks early to avoid wasting
+        resources on a fix the agent can't resolve.
+
         Args:
             files_changed: List of file paths that were edited.
             fix_callback: Optional callable(error_message) -> str that
@@ -165,7 +169,8 @@ class AutoFixer:
         """
         total_checks = 0
         total_fixes = 0
-        final_errors = []
+        final_errors: list[str] = []
+        previous_error_keys: set[str] = set()
 
         for attempt in range(self.max_attempts):
             results = self.run_checks(files_changed)
@@ -185,6 +190,19 @@ class AutoFixer:
                 final_errors = [f"{r.check_name}: {r.output[:200]}" for r in failures]
                 break
 
+            # Infinite loop detection: compare error signatures with previous attempt
+            current_error_keys = {
+                f"{r.check_name}:{r.file}:{r.output[:100]}" for r in failures
+            }
+            if current_error_keys == previous_error_keys:
+                log.warning(
+                    "Same errors recurring after fix attempt %d — breaking to avoid infinite loop",
+                    attempt + 1,
+                )
+                final_errors = [f"{r.check_name}: {r.output[:200]}" for r in failures]
+                break
+            previous_error_keys = current_error_keys
+
             # Attempt to fix each failure
             for failure in failures:
                 error_msg = (
@@ -197,14 +215,15 @@ class AutoFixer:
                 fix_callback(error_msg)
                 total_fixes += 1
 
-        # Final check after all fix attempts
-        results = self.run_checks(files_changed)
-        failures = [r for r in results if not r.passed]
-        final_errors = [f"{r.check_name}: {r.output[:200]}" for r in failures]
+        # Final check after all fix attempts (only if we didn't break early)
+        if not final_errors:
+            results = self.run_checks(files_changed)
+            failures = [r for r in results if not r.passed]
+            final_errors = [f"{r.check_name}: {r.output[:200]}" for r in failures]
 
         return AutoFixResult(
-            all_passed=len(failures) == 0,
-            checks_run=total_checks + len(results),
+            all_passed=len(final_errors) == 0,
+            checks_run=total_checks + (len(results) if not final_errors else 0),
             fixes_attempted=total_fixes,
             final_errors=final_errors,
         )

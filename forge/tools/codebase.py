@@ -844,22 +844,54 @@ class CodebaseTool:
 
     Exposes codebase search, symbol lookup, and project overview as tool
     functions that agents can invoke through Ollama tool calling.
+
+    Includes staleness detection — if files have changed since the index
+    was built, the stale entries are automatically refreshed.
     """
 
     name = "codebase"
     description = "Search code, find symbols, and explore project structure"
 
+    # Re-check for staleness every 5 minutes
+    STALENESS_CHECK_INTERVAL = 300
+
     def __init__(self, working_dir: str = ".", client: Any = None):
         self._indexer = CodebaseIndexer(project_dir=working_dir, client=client)
         self._indexed = False
+        self._last_staleness_check: float = 0
 
     def _ensure_indexed(self) -> None:
-        """Build or load the index on first use."""
+        """Build or load the index on first use, and refresh stale entries."""
         if not self._indexed:
             self._indexer._load_index()
             if not self._indexer._file_index:
                 self._indexer.build_index()
             self._indexed = True
+            self._last_staleness_check = time.time()
+        elif time.time() - self._last_staleness_check > self.STALENESS_CHECK_INTERVAL:
+            self._refresh_stale_entries()
+            self._last_staleness_check = time.time()
+
+    def _refresh_stale_entries(self) -> None:
+        """Check for files that changed since last index and re-index them."""
+        stale_count = 0
+        for path, entry in list(self._indexer._file_index.items()):
+            full_path = self._indexer.project_dir / path
+            if not full_path.exists():
+                self._indexer._remove_from_index(path)
+                stale_count += 1
+                continue
+            try:
+                current_hash = hashlib.md5(full_path.read_bytes()).hexdigest()
+                if current_hash != entry.hash:
+                    self._indexer._remove_from_index(path)
+                    self._indexer._index_file(full_path)
+                    stale_count += 1
+            except (OSError, PermissionError):
+                continue
+        if stale_count:
+            self._indexer._save_index()
+            log.info("Refreshed %d stale index entries", stale_count)
 
     def get_tool_definitions(self) -> list[dict[str, Any]]:
         """Return Ollama tool-calling definitions."""
