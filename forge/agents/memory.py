@@ -130,7 +130,26 @@ class ConversationMemory:
         source: str = "conversation",
         confidence: float = 1.0,
     ) -> None:
-        """Store a persistent fact."""
+        """Store a persistent fact, deduplicating near-identical values.
+
+        If a fact with the same key exists and the value is similar
+        (>80% match), it updates the existing fact instead of adding
+        a duplicate.
+        """
+        # Check for near-duplicate values under different keys
+        for existing_key, existing_fact in self._facts.items():
+            if existing_key != key and self._is_similar(existing_fact.value, value):
+                log.debug(
+                    "Dedup: new fact '%s' is similar to existing '%s', updating existing",
+                    key, existing_key,
+                )
+                # Update existing fact with newer value and higher confidence
+                existing_fact.value = value
+                existing_fact.timestamp = time.time()
+                existing_fact.confidence = max(existing_fact.confidence, confidence)
+                self._save_facts()
+                return
+
         fact = MemoryFact(
             key=key,
             value=value,
@@ -141,6 +160,26 @@ class ConversationMemory:
         self._facts[key] = fact
         self._save_facts()
         log.debug("Stored fact: %s = %s", key, value[:50])
+
+    @staticmethod
+    def _is_similar(a: str, b: str, threshold: float = 0.8) -> bool:
+        """Check if two strings are similar using a simple ratio.
+
+        Uses sequence matching ratio — fast enough for fact comparison
+        without requiring external dependencies.
+        """
+        if a == b:
+            return True
+        if not a or not b:
+            return False
+
+        # Quick length check — very different lengths are unlikely similar
+        if min(len(a), len(b)) / max(len(a), len(b)) < 0.5:
+            return False
+
+        # Compute similarity ratio using longest common subsequence
+        from difflib import SequenceMatcher
+        return SequenceMatcher(None, a.lower(), b.lower()).ratio() >= threshold
 
     def get_fact(self, key: str) -> str | None:
         """Retrieve a stored fact by key."""

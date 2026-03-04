@@ -78,6 +78,14 @@ class BaseAgent:
         # Cache tool definitions (rebuilt only when tools change)
         self._cached_tool_defs: list[dict[str, Any]] | None = None
 
+        # Build function_name → tool instance map for O(1) dispatch
+        self._function_tool_map: dict[str, Any] = {}
+        for tool in self._tools.values():
+            for defn in tool.get_tool_definitions():
+                func_name = defn.get("function", {}).get("name", "")
+                if func_name:
+                    self._function_tool_map[func_name] = tool
+
     def get_tool_definitions(self) -> list[dict[str, Any]]:
         """Get all tool definitions for Ollama tool calling (cached)."""
         if self._cached_tool_defs is None:
@@ -196,17 +204,22 @@ class BaseAgent:
 
         Checks permissions before executing. If the user denies
         the action, returns a message indicating denial.
+        Wraps execution in try/except to prevent tool errors from
+        crashing the chat loop.
         """
         # Check permission before executing
         if not self.permissions.check(function_name, context=args):
             log.info("Permission denied for %s", function_name)
             return f"Action '{function_name}' was denied by the user."
 
-        for tool in self._tools.values():
-            definitions = tool.get_tool_definitions()
-            tool_names = [d["function"]["name"] for d in definitions]
-            if function_name in tool_names:
+        # Use cached function→tool mapping for O(1) lookup
+        tool = self._function_tool_map.get(function_name)
+        if tool:
+            try:
                 return tool.execute(function_name, args)
+            except Exception as e:
+                log.error("Tool execution error for %s: %s", function_name, e)
+                return f"Tool error in '{function_name}': {e}"
 
         return f"Unknown tool function: {function_name}"
 

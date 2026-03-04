@@ -111,10 +111,16 @@ class AgentOrchestrator:
         self.agents[agent.config.name] = agent
 
     def switch_agent(self, name: str) -> str:
-        """Switch the active agent."""
+        """Switch the active agent (case-insensitive)."""
+        name = name.strip()
+        # Case-insensitive lookup
         if name not in self.agents:
-            available = ", ".join(self.agents.keys())
-            return f"Unknown agent: {name}. Available: {available}"
+            lower_map = {k.lower(): k for k in self.agents}
+            if name.lower() in lower_map:
+                name = lower_map[name.lower()]
+            else:
+                available = ", ".join(self.agents.keys())
+                return f"Unknown agent: {name}. Available: {available}"
 
         self.active_agent = name
         return f"Switched to agent: {name} — {self.agents[name].config.description}"
@@ -147,8 +153,14 @@ class AgentOrchestrator:
     ) -> str:
         """Create a new agent from parameters.
 
-        If save=True, writes a YAML definition to the agents/ directory.
+        Validates inputs before creating. If save=True, writes a YAML
+        definition to the agents/ directory.
         """
+        # Validate inputs
+        errors = self._validate_agent_params(name, description, system_prompt, tools, temperature)
+        if errors:
+            return f"Cannot create agent: {'; '.join(errors)}"
+
         if name in self.agents:
             return f"Agent '{name}' already exists. Choose a different name."
 
@@ -218,3 +230,34 @@ class AgentOrchestrator:
     def get_all_stats(self) -> dict[str, Any]:
         """Get stats for all agents."""
         return {name: agent.get_stats() for name, agent in self.agents.items()}
+
+    @staticmethod
+    def _validate_agent_params(
+        name: str,
+        description: str,
+        system_prompt: str,
+        tools: list[str] | None,
+        temperature: float,
+    ) -> list[str]:
+        """Validate agent creation parameters. Returns list of errors."""
+        from forge.tools import BUILTIN_TOOLS
+
+        errors: list[str] = []
+
+        if not name or not name.strip():
+            errors.append("name cannot be empty")
+        elif not name.replace("-", "").replace("_", "").isalnum():
+            errors.append("name must be alphanumeric (hyphens and underscores allowed)")
+
+        if not system_prompt or not system_prompt.strip():
+            errors.append("system_prompt cannot be empty")
+
+        if not (0.0 <= temperature <= 2.0):
+            errors.append(f"temperature must be 0.0-2.0, got {temperature}")
+
+        if tools:
+            unknown = [t for t in tools if t not in BUILTIN_TOOLS]
+            if unknown:
+                errors.append(f"unknown tools: {', '.join(unknown)} (available: {', '.join(BUILTIN_TOOLS.keys())})")
+
+        return errors

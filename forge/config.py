@@ -50,8 +50,43 @@ class ForgeConfig:
             self.mcp_config_path = str(CONFIG_DIR / "mcp.yaml")
 
 
+def validate_config(config: ForgeConfig) -> list[str]:
+    """Validate a ForgeConfig, returning a list of errors (empty = valid).
+
+    Checks types, value ranges, and known enum values.
+    """
+    errors: list[str] = []
+
+    # URL validation
+    if not config.ollama_base_url.startswith(("http://", "https://")):
+        errors.append(f"ollama_base_url must start with http:// or https://, got: {config.ollama_base_url}")
+
+    # Integer range checks
+    if config.max_context_tokens < 256:
+        errors.append(f"max_context_tokens must be >= 256, got: {config.max_context_tokens}")
+    if config.max_context_tokens > 1_000_000:
+        errors.append(f"max_context_tokens seems too large: {config.max_context_tokens}")
+
+    if not (1 <= config.web_port <= 65535):
+        errors.append(f"web_port must be 1-65535, got: {config.web_port}")
+
+    # Known enum values
+    valid_strategies = {"sliding_summary", "truncate", "progressive"}
+    if config.compression_strategy not in valid_strategies:
+        errors.append(f"compression_strategy must be one of {valid_strategies}, got: {config.compression_strategy}")
+
+    valid_log_levels = {"DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"}
+    if config.log_level.upper() not in valid_log_levels:
+        errors.append(f"log_level must be one of {valid_log_levels}, got: {config.log_level}")
+
+    return errors
+
+
 def load_config() -> ForgeConfig:
-    """Load configuration from YAML file, env vars, and defaults."""
+    """Load configuration from YAML file, env vars, and defaults.
+
+    Validates the resulting config and logs warnings for any issues.
+    """
     load_env()
 
     config = ForgeConfig()
@@ -81,9 +116,20 @@ def load_config() -> ForgeConfig:
             if field_type is bool:
                 setattr(config, config_key, value.lower() not in ("0", "false", "no"))
             elif field_type is int:
-                setattr(config, config_key, int(value))
+                try:
+                    setattr(config, config_key, int(value))
+                except ValueError:
+                    pass  # Keep default if env var is not a valid int
             else:
                 setattr(config, config_key, value)
+
+    # Validate
+    import logging
+    validation_errors = validate_config(config)
+    if validation_errors:
+        logger = logging.getLogger("forge.config")
+        for err in validation_errors:
+            logger.warning("Config issue: %s", err)
 
     return config
 
