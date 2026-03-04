@@ -118,6 +118,34 @@ def _get_gfx_from_rocminfo() -> str:
     return ""
 
 
+def validate_gfx_override(gfx_version: str) -> str:
+    """Validate a user-provided HSA_OVERRIDE_GFX_VERSION.
+
+    Returns error message or empty string if valid.
+    """
+    if not gfx_version:
+        return "GFX version cannot be empty"
+
+    # Must match format like "10.3.0", "11.0.0", "12.0.0"
+    if not re.match(r"^\d+\.\d+\.\d+$", gfx_version):
+        return f"Invalid format: '{gfx_version}' (expected: X.Y.Z, e.g., '10.3.0')"
+
+    # Check if it's a known valid override target
+    valid_targets = set(GFX_OVERRIDES.values())
+    if gfx_version not in valid_targets:
+        suggestion = ", ".join(sorted(valid_targets))
+        return f"Unknown GFX target '{gfx_version}'. Known targets: {suggestion}"
+
+    return ""
+
+
+# Required Linux groups for ROCm GPU access
+ROCM_REQUIRED_GROUPS = {"render", "video"}
+
+# Optional groups that may be needed for some configurations
+ROCM_OPTIONAL_GROUPS = {"compute"}
+
+
 def get_rocm_status() -> dict[str, str]:
     """Get current ROCm status for display."""
     status: dict[str, str] = {}
@@ -135,12 +163,27 @@ def get_rocm_status() -> dict[str, str]:
         if val:
             status[var] = val
 
-    # User groups
+    # Validate GFX override if set
+    gfx = os.environ.get("HSA_OVERRIDE_GFX_VERSION", "")
+    if gfx:
+        validation = validate_gfx_override(gfx)
+        if validation:
+            status["gfx_override_warning"] = validation
+
+    # User groups (check required + optional)
     try:
         result = subprocess.run(["groups"], capture_output=True, text=True, timeout=5)
-        groups = result.stdout.strip().split()
-        status["render_group"] = "yes" if "render" in groups else "no"
-        status["video_group"] = "yes" if "video" in groups else "no"
+        groups = set(result.stdout.strip().split())
+        for g in ROCM_REQUIRED_GROUPS:
+            status[f"{g}_group"] = "yes" if g in groups else "no"
+        for g in ROCM_OPTIONAL_GROUPS:
+            if g in groups:
+                status[f"{g}_group"] = "yes"
+
+        # Warn about missing required groups
+        missing = ROCM_REQUIRED_GROUPS - groups
+        if missing:
+            status["group_warning"] = f"Missing required groups: {', '.join(sorted(missing))}. Fix with: sudo usermod -aG {','.join(sorted(missing))} $USER"
     except (FileNotFoundError, subprocess.TimeoutExpired):
         pass
 

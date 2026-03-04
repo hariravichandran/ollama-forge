@@ -14,6 +14,7 @@ Includes an audit log for security review and dangerous command detection.
 
 from __future__ import annotations
 
+import gzip
 import json
 import re
 import sys
@@ -26,6 +27,22 @@ from typing import Any, Callable
 from forge.utils.logging import get_logger
 
 log = get_logger("agents.permissions")
+
+# Audit log rotation
+MAX_AUDIT_LOG_ENTRIES = 100_000  # Rotate after this many entries
+AUDIT_LOG_CHECK_INTERVAL = 1000  # Check size every N writes
+
+# Secret patterns to redact in audit logs
+SECRET_PATTERNS = [
+    re.compile(r"(api[_-]?key|apikey)\s*[=:]\s*\S+", re.IGNORECASE),
+    re.compile(r"(password|passwd|pwd)\s*[=:]\s*\S+", re.IGNORECASE),
+    re.compile(r"(token|secret|auth)\s*[=:]\s*\S+", re.IGNORECASE),
+    re.compile(r"(sk-|ghp_|gho_|glpat-|xoxb-|xoxp-)\S+", re.IGNORECASE),
+    re.compile(r"Bearer\s+\S+", re.IGNORECASE),
+]
+
+# Permission request rate limiting
+MAX_PROMPTS_PER_MINUTE = 20
 
 # Dangerous shell command patterns that should trigger extra warnings
 DANGEROUS_PATTERNS: list[tuple[str, str]] = [
@@ -128,9 +145,13 @@ class PermissionManager:
 
         # Audit log — records all permission decisions
         self._audit_file: Path | None = None
+        self._audit_write_count = 0
         if audit_file:
             self._audit_file = Path(audit_file)
             self._audit_file.parent.mkdir(parents=True, exist_ok=True)
+
+        # Rate limiting for permission prompts
+        self._prompt_timestamps: list[float] = []
 
     def check(self, action: str, context: dict[str, Any] | None = None) -> bool:
         """Check if an action is allowed. May prompt the user.
@@ -205,7 +226,15 @@ class PermissionManager:
         self, action: str, description: str, context: dict | None,
         danger: str = "",
     ) -> bool:
-        """Prompt the user for approval, with danger warning if applicable."""
+        """Prompt the user for approval, with danger warning if applicable.
+
+        Includes rate limiting to prevent agents from spamming prompts.
+        """
+        # Rate limit: check prompts per minute
+        if self._is_rate_limited():
+            log.warning("Permission prompt rate limit exceeded for action: %s", action)
+            return False
+
         context_str = ""
         if context:
             # Show relevant context
@@ -221,7 +250,15 @@ class PermissionManager:
         if context_str:
             prompt += context_str
 
+        self._prompt_timestamps.append(time.time())
         return self._prompt_fn(prompt)
+
+    def _is_rate_limited(self) -> bool:
+        """Check if permission prompts have exceeded rate limit."""
+        now = time.time()
+        cutoff = now - 60  # 1 minute window
+        self._prompt_timestamps = [t for t in self._prompt_timestamps if t > cutoff]
+        return len(self._prompt_timestamps) >= MAX_PROMPTS_PER_MINUTE
 
     @staticmethod
     def _detect_dangerous(action: str, context: dict[str, Any] | None) -> str:
@@ -245,7 +282,10 @@ class PermissionManager:
         self, action: str, decision: str,
         context: dict[str, Any] | None, danger: str = "",
     ) -> None:
-        """Append a permission decision to the audit log."""
+        """Append a permission decision to the audit log.
+
+        Includes secret redaction and automatic log rotation.
+        """
         if not self._audit_file:
             return
 
@@ -256,16 +296,81 @@ class PermissionManager:
             "danger": danger,
         }
         if context:
-            # Store truncated context for auditing
+            # Store truncated + redacted context for auditing
             entry["context"] = {
-                k: str(v)[:200] for k, v in context.items()
+                k: self._redact_secrets(str(v)[:200]) for k, v in context.items()
             }
 
         try:
             with open(self._audit_file, "a") as f:
                 f.write(json.dumps(entry) + "\n")
+            self._audit_write_count += 1
+
+            # Periodic rotation check
+            if self._audit_write_count % AUDIT_LOG_CHECK_INTERVAL == 0:
+                self._rotate_audit_log()
         except OSError:
             pass
+
+    @staticmethod
+    def _redact_secrets(text: str) -> str:
+        """Redact potential secrets from text before logging.
+
+        Detects API keys, passwords, tokens, and other credentials.
+        """
+        for pattern in SECRET_PATTERNS:
+            text = pattern.sub("***REDACTED***", text)
+        return text
+
+    def _rotate_audit_log(self) -> None:
+        """Rotate audit log if it exceeds MAX_AUDIT_LOG_ENTRIES.
+
+        Compresses old log to .gz and starts a fresh log.
+        """
+        if not self._audit_file or not self._audit_file.exists():
+            return
+
+        try:
+            line_count = sum(1 for _ in open(self._audit_file))
+            if line_count < MAX_AUDIT_LOG_ENTRIES:
+                return
+
+            # Compress old log
+            gz_path = self._audit_file.with_suffix(".log.gz")
+            with open(self._audit_file, "rb") as f_in:
+                with gzip.open(gz_path, "ab") as f_out:
+                    f_out.write(f_in.read())
+
+            # Truncate the current log
+            self._audit_file.write_text("")
+            self._audit_write_count = 0
+            log.info("Rotated audit log (%d entries) → %s", line_count, gz_path)
+        except OSError as e:
+            log.warning("Audit log rotation failed: %s", e)
+
+    def get_audit_stats(self) -> dict[str, Any]:
+        """Get audit log statistics."""
+        if not self._audit_file or not self._audit_file.exists():
+            return {"entries": 0}
+
+        decisions: dict[str, int] = {}
+        try:
+            for line in self._audit_file.read_text().splitlines():
+                if not line.strip():
+                    continue
+                try:
+                    entry = json.loads(line)
+                    d = entry.get("decision", "unknown")
+                    decisions[d] = decisions.get(d, 0) + 1
+                except json.JSONDecodeError:
+                    continue
+        except OSError:
+            pass
+
+        return {
+            "entries": sum(decisions.values()),
+            "decisions": decisions,
+        }
 
     @staticmethod
     def _default_prompt(message: str) -> bool:

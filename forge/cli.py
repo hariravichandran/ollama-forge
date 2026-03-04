@@ -106,7 +106,12 @@ def chat(model: str, agent: str, working_dir: str, cascade: bool, auto_approve: 
             console.print(f"[red]Input file not found: {input_file}[/red]")
             sys.exit(1)
 
-        prompts = [line.strip() for line in input_path.read_text().splitlines() if line.strip()]
+        try:
+            content = input_path.read_text(encoding="utf-8", errors="replace")
+        except OSError as e:
+            console.print(f"[red]Cannot read input file: {e}[/red]")
+            sys.exit(1)
+        prompts = [line.strip() for line in content.splitlines() if line.strip()]
         if not prompts:
             console.print("[yellow]Input file is empty.[/yellow]")
             return
@@ -242,6 +247,7 @@ def chat(model: str, agent: str, working_dir: str, cascade: bool, auto_approve: 
                 "  /history       — Show recent conversation messages\n"
                 "  /save          — Save current session to disk\n"
                 "  /load <id>     — Load a saved session\n"
+                "  /export [fmt]  — Export conversation (json, markdown, txt)\n"
                 "  /stats         — Show usage statistics\n"
                 "  /remember <f>  — Store a fact in memory\n"
                 "  /forget        — Clear all stored facts\n"
@@ -249,6 +255,13 @@ def chat(model: str, agent: str, working_dir: str, cascade: bool, auto_approve: 
                 "  /idea          — Submit or list community ideas\n"
                 "  /quit          — Exit the chat"
             )
+            continue
+        elif user_input.startswith("/export"):
+            current = orchestrator.agents.get(orchestrator.active_agent)
+            if current and current.messages:
+                _handle_export_command(user_input, current.messages, orchestrator.active_agent)
+            else:
+                console.print("[dim]No messages to export.[/dim]")
             continue
         elif user_input.startswith("/idea"):
             _handle_idea_command(user_input, working_dir)
@@ -284,6 +297,50 @@ def _handle_idea_command(user_input: str, working_dir: str):
             console.print(f"[green]{result}[/green]")
     else:
         console.print("Usage: /idea [list|submit <description>]")
+
+
+def _handle_export_command(user_input: str, messages: list[dict], agent_name: str):
+    """Handle /export command — export conversation in json, markdown, or txt."""
+    import json as json_module
+    from datetime import datetime
+    from pathlib import Path
+
+    parts = user_input.split(maxsplit=1)
+    fmt = parts[1].strip().lower() if len(parts) > 1 else "markdown"
+
+    if fmt not in ("json", "markdown", "md", "txt", "text"):
+        console.print("[yellow]Usage: /export [json|markdown|txt][/yellow]")
+        return
+
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+
+    if fmt == "json":
+        filename = f"conversation_{timestamp}.json"
+        content = json_module.dumps(messages, indent=2, ensure_ascii=False)
+    elif fmt in ("markdown", "md"):
+        filename = f"conversation_{timestamp}.md"
+        lines = [f"# Conversation with {agent_name}\n", f"*Exported: {datetime.now().isoformat()}*\n"]
+        for msg in messages:
+            role = msg.get("role", "unknown")
+            text = msg.get("content") or ""
+            if role == "user":
+                lines.append(f"## You\n\n{text}\n")
+            elif role == "assistant":
+                lines.append(f"## Agent ({agent_name})\n\n{text}\n")
+            elif role == "system":
+                lines.append(f"## System\n\n> {text}\n")
+        content = "\n".join(lines)
+    else:  # txt/text
+        filename = f"conversation_{timestamp}.txt"
+        lines = []
+        for msg in messages:
+            role = msg.get("role", "unknown").upper()
+            text = msg.get("content") or ""
+            lines.append(f"[{role}]\n{text}\n")
+        content = "\n".join(lines)
+
+    Path(filename).write_text(content, encoding="utf-8")
+    console.print(f"[green]Exported {len(messages)} messages → {filename}[/green]")
 
 
 # ─── UI (Web) ────────────────────────────────────────────────────────────────

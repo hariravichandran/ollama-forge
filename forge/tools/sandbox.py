@@ -37,6 +37,12 @@ DEFAULT_TIMEOUT = 30  # seconds
 DEFAULT_MAX_MEMORY_MB = 256  # megabytes
 DEFAULT_MAX_OUTPUT = 50_000  # characters
 
+# Validation ranges
+MIN_TIMEOUT = 1
+MAX_TIMEOUT = 300  # 5 minutes
+MIN_MEMORY_MB = 16
+MAX_MEMORY_MB = 2048  # 2 GB
+
 
 @dataclass
 class ExecutionResult:
@@ -48,6 +54,7 @@ class ExecutionResult:
     duration_s: float
     timed_out: bool = False
     error: str = ""
+    peak_memory_mb: float = 0.0  # Peak RSS in MB (Linux only, 0 if unavailable)
 
     @property
     def success(self) -> bool:
@@ -94,12 +101,23 @@ class Sandbox:
         allow_project_read: bool = False,
         project_dir: str | None = None,
     ):
-        self.timeout = timeout
-        self.max_memory_mb = max_memory_mb
-        self.max_output = max_output
+        # Validate and clamp resource limits
+        self.timeout = max(MIN_TIMEOUT, min(timeout, MAX_TIMEOUT))
+        self.max_memory_mb = max(MIN_MEMORY_MB, min(max_memory_mb, MAX_MEMORY_MB))
+        self.max_output = max(100, min(max_output, 500_000))
         self.allow_network = allow_network
         self.allow_project_read = allow_project_read
         self.project_dir = project_dir
+        # Execution metrics
+        self._execution_count = 0
+        self._total_duration_s = 0.0
+        self._timeout_count = 0
+        self._error_count = 0
+
+        if timeout != self.timeout:
+            log.info("Sandbox timeout clamped: %d → %d", timeout, self.timeout)
+        if max_memory_mb != self.max_memory_mb:
+            log.info("Sandbox memory clamped: %d → %d MB", max_memory_mb, self.max_memory_mb)
 
     def run_python(
         self,
@@ -134,13 +152,17 @@ class Sandbox:
                     file_path.parent.mkdir(parents=True, exist_ok=True)
                     file_path.write_text(content)
 
-            # If project read is allowed, symlink project dir
+            # If project read is allowed, symlink project dir (with validation)
             if self.allow_project_read and self.project_dir:
-                project_link = Path(tmpdir) / "project"
-                try:
-                    project_link.symlink_to(self.project_dir)
-                except Exception:
-                    pass
+                project_path = Path(self.project_dir).resolve()
+                if project_path.exists() and project_path.is_dir():
+                    project_link = Path(tmpdir) / "project"
+                    try:
+                        project_link.symlink_to(str(project_path))
+                    except Exception:
+                        pass
+                else:
+                    log.warning("Project dir does not exist or is not a directory: %s", self.project_dir)
 
             # Build the command
             cmd = [sys.executable, str(code_file)]
@@ -274,33 +296,78 @@ class Sandbox:
             stdout = stdout[:self.max_output] if stdout else ""
             stderr = stderr[:self.max_output] if stderr else ""
 
+            # Try to get peak memory usage (Linux only)
+            peak_mem = self._get_peak_memory(proc.pid)
+
+            self._execution_count += 1
+            self._total_duration_s += duration
+
             return ExecutionResult(
                 stdout=stdout,
                 stderr=stderr,
                 return_code=proc.returncode,
                 duration_s=round(duration, 2),
+                peak_memory_mb=peak_mem,
             )
 
         except subprocess.TimeoutExpired:
             proc.kill()
             proc.wait()
+            self._execution_count += 1
+            self._timeout_count += 1
+            duration = time.time() - start
+            self._total_duration_s += duration
             return ExecutionResult(
                 stdout="",
                 stderr="",
                 return_code=-1,
-                duration_s=round(time.time() - start, 2),
+                duration_s=round(duration, 2),
                 timed_out=True,
                 error=f"Execution timed out after {timeout}s",
             )
 
         except Exception as e:
+            self._execution_count += 1
+            self._error_count += 1
+            duration = time.time() - start
+            self._total_duration_s += duration
             return ExecutionResult(
                 stdout="",
                 stderr="",
                 return_code=-1,
-                duration_s=round(time.time() - start, 2),
+                duration_s=round(duration, 2),
                 error=str(e),
             )
+
+    @staticmethod
+    def _get_peak_memory(pid: int) -> float:
+        """Get peak memory usage of a process in MB (Linux only).
+
+        Reads /proc/<pid>/status for VmHWM (high water mark RSS).
+        Returns 0.0 if unavailable.
+        """
+        try:
+            status_path = Path(f"/proc/{pid}/status")
+            if status_path.exists():
+                for line in status_path.read_text().splitlines():
+                    if line.startswith("VmHWM:"):
+                        # VmHWM:    12345 kB
+                        kb = int(line.split()[1])
+                        return round(kb / 1024, 1)
+        except (OSError, ValueError, IndexError):
+            pass
+        return 0.0
+
+    def get_metrics(self) -> dict[str, Any]:
+        """Get sandbox execution metrics."""
+        return {
+            "executions": self._execution_count,
+            "total_duration_s": round(self._total_duration_s, 2),
+            "avg_duration_s": round(self._total_duration_s / max(1, self._execution_count), 2),
+            "timeouts": self._timeout_count,
+            "errors": self._error_count,
+            "timeout_rate": round(self._timeout_count / max(1, self._execution_count), 2),
+        }
 
     def _build_env(self, tmpdir: str) -> dict[str, str]:
         """Build an isolated environment for the subprocess."""
