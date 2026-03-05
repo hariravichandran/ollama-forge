@@ -19,6 +19,11 @@ if TYPE_CHECKING:
 
 log = get_logger("mcp.natural_language")
 
+# Input limits
+MAX_REQUEST_TEXT_LENGTH = 500  # max NL request length
+MAX_MCP_LIST_DISPLAY = 50  # max MCPs to display in list
+MCP_NAME_COLUMN_WIDTH = 20  # formatting width for MCP names
+
 
 def parse_mcp_request(text: str) -> dict[str, Any]:
     """Parse a natural language MCP request.
@@ -28,6 +33,10 @@ def parse_mcp_request(text: str) -> dict[str, Any]:
       mcp_name: matched MCP name or None
       query: original text for fuzzy matching
     """
+    if not text or not text.strip():
+        return {"action": None, "mcp_name": None, "query": ""}
+    if len(text) > MAX_REQUEST_TEXT_LENGTH:
+        text = text[:MAX_REQUEST_TEXT_LENGTH]
     text_lower = text.lower().strip()
 
     # Detect action
@@ -80,6 +89,8 @@ def handle_mcp_request(manager: MCPManager, text: str) -> str:
 
     This is the main entry point for NL-based MCP management.
     """
+    if not text or not text.strip():
+        return "Please provide an MCP request (e.g., 'add web search' or 'list MCPs')"
     parsed = parse_mcp_request(text)
     action = parsed["action"]
     name = parsed["mcp_name"]
@@ -104,7 +115,7 @@ def handle_mcp_request(manager: MCPManager, text: str) -> str:
         lines = ["Available MCP servers:\n"]
         for mcp in available:
             status_icon = {"enabled": "[on]", "disabled": "[off]", "built-in": "[built-in]"}.get(mcp["status"], "[ ]")
-            lines.append(f"  {status_icon} {mcp['name']:20s} {mcp['description']}")
+            lines.append(f"  {status_icon} {mcp['name']:{MCP_NAME_COLUMN_WIDTH}s} {mcp['description']}")
         return "\n".join(lines)
 
     elif action == "search":
@@ -115,7 +126,7 @@ def handle_mcp_request(manager: MCPManager, text: str) -> str:
         if results:
             lines = [f"MCPs matching '{query}':\n"]
             for r in results:
-                lines.append(f"  {r.name:20s} {r.description}")
+                lines.append(f"  {r.name:{MCP_NAME_COLUMN_WIDTH}s} {r.description}")
             return "\n".join(lines)
         return f"No MCPs found matching '{query}'"
 
@@ -124,7 +135,7 @@ def handle_mcp_request(manager: MCPManager, text: str) -> str:
         if suggestions:
             lines = ["Suggested MCPs:\n"]
             for s in suggestions:
-                lines.append(f"  {s.name:20s} {s.description}")
+                lines.append(f"  {s.name:{MCP_NAME_COLUMN_WIDTH}s} {s.description}")
             return "\n".join(lines)
         return "No specific suggestions for your current context. Try 'forge mcp list' to see all options."
 

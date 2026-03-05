@@ -43,6 +43,12 @@ SECRET_PATTERNS = [
 
 # Permission request rate limiting
 MAX_PROMPTS_PER_MINUTE = 20
+RATE_LIMIT_WINDOW_S = 60  # 1 minute window for rate limiting
+
+# Display limits
+MAX_CONTEXT_VALUE_DISPLAY = 100  # max chars for context values in prompts
+MAX_CONTEXT_VALUE_AUDIT = 200  # max chars for context values in audit log
+MAX_ACTION_NAME_LENGTH = 100  # max action name length
 
 # Dangerous shell command patterns that should trigger extra warnings
 DANGEROUS_PATTERNS: list[tuple[str, str]] = [
@@ -166,6 +172,9 @@ class PermissionManager:
         Returns:
             True if the action is approved, False if denied.
         """
+        if not action or len(action) > MAX_ACTION_NAME_LENGTH:
+            log.warning("Invalid action name (empty or too long): %s", action[:50] if action else "")
+            return False
         # Check for dangerous patterns in context
         danger = self._detect_dangerous(action, context)
         if danger:
@@ -240,8 +249,8 @@ class PermissionManager:
             # Show relevant context
             for key, value in context.items():
                 val_str = str(value)
-                if len(val_str) > 100:
-                    val_str = val_str[:100] + "..."
+                if len(val_str) > MAX_CONTEXT_VALUE_DISPLAY:
+                    val_str = val_str[:MAX_CONTEXT_VALUE_DISPLAY] + "..."
                 context_str += f"\n  {key}: {val_str}"
 
         prompt = f"[Permission] {description}"
@@ -256,7 +265,7 @@ class PermissionManager:
     def _is_rate_limited(self) -> bool:
         """Check if permission prompts have exceeded rate limit."""
         now = time.time()
-        cutoff = now - 60  # 1 minute window
+        cutoff = now - RATE_LIMIT_WINDOW_S
         self._prompt_timestamps = [t for t in self._prompt_timestamps if t > cutoff]
         return len(self._prompt_timestamps) >= MAX_PROMPTS_PER_MINUTE
 
@@ -298,7 +307,7 @@ class PermissionManager:
         if context:
             # Store truncated + redacted context for auditing
             entry["context"] = {
-                k: self._redact_secrets(str(v)[:200]) for k, v in context.items()
+                k: self._redact_secrets(str(v)[:MAX_CONTEXT_VALUE_AUDIT]) for k, v in context.items()
             }
 
         try:

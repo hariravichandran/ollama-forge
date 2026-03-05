@@ -32,6 +32,12 @@ MAX_FACTS = 500  # Maximum number of facts to store
 MAX_FACT_KEY_LENGTH = 100
 MAX_FACT_VALUE_LENGTH = 1000
 FACT_TTL_DAYS = 90  # Facts older than this are pruned on load
+MIN_CONFIDENCE = 0.0
+MAX_CONFIDENCE = 1.0
+
+# Session limits
+MAX_RECENT_SESSIONS = 3  # max sessions to scan for recent context
+MAX_SUMMARY_LENGTH = 10_000  # max summary text length
 
 
 @dataclass
@@ -117,7 +123,7 @@ class ConversationMemory:
             return []
 
         messages = []
-        for conv_file in conv_files[:3]:  # check last 3 sessions max
+        for conv_file in conv_files[:MAX_RECENT_SESSIONS]:
             try:
                 for line in conv_file.read_text().splitlines():
                     line = line.strip()
@@ -153,6 +159,7 @@ class ConversationMemory:
             return
         key = key.strip()[:MAX_FACT_KEY_LENGTH]
         value = value.strip()[:MAX_FACT_VALUE_LENGTH]
+        confidence = min(max(confidence, MIN_CONFIDENCE), MAX_CONFIDENCE)
         if not value:
             log.warning("Rejecting fact with empty value for key: %s", key)
             return
@@ -226,6 +233,9 @@ class ConversationMemory:
 
     def save_summary(self, summary: str) -> None:
         """Save a conversation summary for quick context loading."""
+        if len(summary) > MAX_SUMMARY_LENGTH:
+            summary = summary[:MAX_SUMMARY_LENGTH]
+            log.warning("Summary truncated to %d chars", MAX_SUMMARY_LENGTH)
         self.summary_file.write_text(summary)
 
     def get_summary(self) -> str:

@@ -23,6 +23,19 @@ log = get_logger("hardware.detect")
 
 SYSTEM = platform.system()  # "Linux", "Darwin", "Windows"
 
+# Subprocess timeouts (seconds)
+TIMEOUT_FAST = 5  # quick queries like sysctl
+TIMEOUT_NORMAL = 10  # standard queries like nvidia-smi, lspci
+TIMEOUT_SLOW = 15  # heavier queries like system_profiler
+
+# Vendor IDs (PCI)
+AMD_VENDOR_ID = "0x1002"
+INTEL_VENDOR_ID = "0x8086"
+
+# Memory thresholds
+OS_MEMORY_HEADROOM_GB = 4.0  # GB reserved for OS in shared-memory configs
+IGPU_VRAM_THRESHOLD_GB = 8.0  # below this VRAM + GTT > 0 = iGPU
+
 
 @dataclass
 class GPUInfo:
@@ -43,10 +56,10 @@ class GPUInfo:
         """Estimated usable memory for LLM inference."""
         if self.is_igpu:
             # iGPU shares system RAM — leave ~4GB for OS
-            return max(0, self.total_gb - 4.0)
+            return max(0, self.total_gb - OS_MEMORY_HEADROOM_GB)
         if self.vendor == "apple":
-            # Apple Silicon unified memory — leave ~4GB for OS
-            return max(0, self.total_gb - 4.0)
+            # Apple Silicon unified memory — leave headroom for OS
+            return max(0, self.total_gb - OS_MEMORY_HEADROOM_GB)
         return self.total_gb
 
 
@@ -152,7 +165,7 @@ def _detect_nvidia_gpu() -> GPUInfo | None:
         result = subprocess.run(
             ["nvidia-smi", "--query-gpu=name,memory.total,driver_version",
              "--format=csv,noheader,nounits"],
-            capture_output=True, text=True, timeout=10,
+            capture_output=True, text=True, timeout=TIMEOUT_NORMAL,
         )
         if result.returncode != 0:
             return None
@@ -188,14 +201,14 @@ def _detect_apple_gpu() -> GPUInfo | None:
         # Get chip name
         result = subprocess.run(
             ["sysctl", "-n", "machdep.cpu.brand_string"],
-            capture_output=True, text=True, timeout=5,
+            capture_output=True, text=True, timeout=TIMEOUT_FAST,
         )
         chip_name = result.stdout.strip() if result.returncode == 0 else "Apple Silicon"
 
         # Total unified memory (this IS the GPU memory on Apple Silicon)
         result = subprocess.run(
             ["sysctl", "-n", "hw.memsize"],
-            capture_output=True, text=True, timeout=5,
+            capture_output=True, text=True, timeout=TIMEOUT_FAST,
         )
         total_bytes = int(result.stdout.strip()) if result.returncode == 0 else 0
         total_gb = total_bytes / (1024 ** 3)
@@ -205,7 +218,7 @@ def _detect_apple_gpu() -> GPUInfo | None:
         try:
             result = subprocess.run(
                 ["system_profiler", "SPDisplaysDataType", "-json"],
-                capture_output=True, text=True, timeout=10,
+                capture_output=True, text=True, timeout=TIMEOUT_NORMAL,
             )
             if result.returncode == 0:
                 data = json.loads(result.stdout)
@@ -250,7 +263,7 @@ def _detect_amd_gpu_linux() -> GPUInfo | None:
         vendor_path = device_dir / "vendor"
         if vendor_path.exists():
             vendor_id = vendor_path.read_text().strip()
-            if vendor_id != "0x1002":  # AMD vendor ID
+            if vendor_id != AMD_VENDOR_ID:
                 continue
 
         vram_path = device_dir / "mem_info_vram_total"
@@ -269,7 +282,7 @@ def _detect_amd_gpu_linux() -> GPUInfo | None:
         if total_gb > best_total:
             best_total = total_gb
             name = _read_amd_gpu_name(device_dir)
-            is_igpu = vram_gb < 8.0 and gtt_gb > 0
+            is_igpu = vram_gb < IGPU_VRAM_THRESHOLD_GB and gtt_gb > 0
 
             arch = ""
             rev_path = device_dir / "gpu_id"
@@ -310,7 +323,7 @@ def _read_amd_gpu_name(device_dir: Path) -> str:
     try:
         result = subprocess.run(
             ["lspci", "-d", "1002:", "-nn"],
-            capture_output=True, text=True, timeout=5,
+            capture_output=True, text=True, timeout=TIMEOUT_FAST,
         )
         if result.returncode == 0 and result.stdout.strip():
             for line in result.stdout.strip().splitlines():
@@ -329,7 +342,7 @@ def _detect_rocm_version() -> str:
     try:
         result = subprocess.run(
             ["rocm-smi", "--showversion"],
-            capture_output=True, text=True, timeout=5,
+            capture_output=True, text=True, timeout=TIMEOUT_FAST,
         )
         if result.returncode == 0:
             for line in result.stdout.splitlines():
@@ -365,7 +378,7 @@ def _detect_intel_gpu_linux() -> GPUInfo | None:
     try:
         result = subprocess.run(
             ["lspci", "-d", "8086:", "-nn"],
-            capture_output=True, text=True, timeout=5,
+            capture_output=True, text=True, timeout=TIMEOUT_FAST,
         )
         if result.returncode != 0:
             return None
@@ -437,7 +450,7 @@ def _detect_intel_vram_linux() -> float:
         if vendor_path.exists():
             try:
                 vendor_id = vendor_path.read_text().strip()
-                if vendor_id != "0x8086":
+                if vendor_id != INTEL_VENDOR_ID:
                     continue
             except OSError:
                 continue
@@ -471,7 +484,7 @@ def _detect_gpu_windows() -> GPUInfo | None:
              "Get-CimInstance Win32_VideoController | "
              "Select-Object Name, AdapterRAM, DriverVersion | "
              "ConvertTo-Json"],
-            capture_output=True, text=True, timeout=10,
+            capture_output=True, text=True, timeout=TIMEOUT_NORMAL,
         )
         if result.returncode != 0:
             return None
@@ -551,21 +564,21 @@ def _detect_cpu_macos() -> CPUInfo:
     try:
         result = subprocess.run(
             ["sysctl", "-n", "machdep.cpu.brand_string"],
-            capture_output=True, text=True, timeout=5,
+            capture_output=True, text=True, timeout=TIMEOUT_FAST,
         )
         if result.returncode == 0:
             info.model = result.stdout.strip()
 
         result = subprocess.run(
             ["sysctl", "-n", "hw.ncpu"],
-            capture_output=True, text=True, timeout=5,
+            capture_output=True, text=True, timeout=TIMEOUT_FAST,
         )
         if result.returncode == 0:
             info.threads = int(result.stdout.strip())
 
         result = subprocess.run(
             ["sysctl", "-n", "hw.physicalcpu"],
-            capture_output=True, text=True, timeout=5,
+            capture_output=True, text=True, timeout=TIMEOUT_FAST,
         )
         if result.returncode == 0:
             info.cores = int(result.stdout.strip())
@@ -584,7 +597,7 @@ def _detect_cpu_windows() -> CPUInfo:
              "Get-CimInstance Win32_Processor | "
              "Select-Object Name, NumberOfCores, NumberOfLogicalProcessors | "
              "ConvertTo-Json"],
-            capture_output=True, text=True, timeout=10,
+            capture_output=True, text=True, timeout=TIMEOUT_NORMAL,
         )
         if result.returncode == 0:
             data = json.loads(result.stdout)
@@ -635,7 +648,7 @@ def _detect_ram_macos() -> float:
     try:
         result = subprocess.run(
             ["sysctl", "-n", "hw.memsize"],
-            capture_output=True, text=True, timeout=5,
+            capture_output=True, text=True, timeout=TIMEOUT_FAST,
         )
         if result.returncode == 0:
             return int(result.stdout.strip()) / (1024 ** 3)
@@ -650,7 +663,7 @@ def _detect_ram_windows() -> float:
         result = subprocess.run(
             ["powershell", "-Command",
              "(Get-CimInstance Win32_ComputerSystem).TotalPhysicalMemory"],
-            capture_output=True, text=True, timeout=10,
+            capture_output=True, text=True, timeout=TIMEOUT_NORMAL,
         )
         if result.returncode == 0:
             return int(result.stdout.strip()) / (1024 ** 3)

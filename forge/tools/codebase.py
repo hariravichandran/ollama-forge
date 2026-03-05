@@ -48,6 +48,18 @@ CODE_EXTENSIONS = {
 # Max file size to index (500KB)
 MAX_FILE_SIZE = 500_000
 
+# Search limits
+MAX_SEARCH_RESULTS = 100  # hard cap on search results
+MAX_SEARCH_QUERY_LENGTH = 500  # max query string length
+MAX_SYMBOL_DISPLAY = 20  # symbols shown in file summary
+MAX_IMPORT_DISPLAY = 15  # imports shown in file summary
+MAX_OVERVIEW_FILES = 200  # max files in project overview
+MAX_DOCSTRING_CONTEXT = 200  # max docstring chars in search results
+MAX_CONTEXT_PREVIEW = 100  # max context preview chars
+MAX_SIGNATURE_LENGTH = 120  # max signature length for display
+MAX_SUMMARY_CONTENT = 3000  # max content chars for LLM summary
+MAX_SUMMARY_LENGTH = 100  # max summary output chars
+
 
 @dataclass
 class Symbol:
@@ -212,6 +224,12 @@ class CodebaseIndexer:
         Searches file paths, symbol names, and file content.
         Returns results sorted by relevance score.
         """
+        if not query or not query.strip():
+            return []
+        if len(query) > MAX_SEARCH_QUERY_LENGTH:
+            query = query[:MAX_SEARCH_QUERY_LENGTH]
+        max_results = min(max(1, max_results), MAX_SEARCH_RESULTS)
+
         if not self._loaded:
             self._load_index()
 
@@ -238,7 +256,7 @@ class CodebaseIndexer:
                     content=sym.signature or sym.name,
                     symbol=sym.name,
                     score=score,
-                    context=sym.docstring[:200] if sym.docstring else "",
+                    context=sym.docstring[:MAX_DOCSTRING_CONTEXT] if sym.docstring else "",
                 ))
 
         # 2. File path matches
@@ -292,13 +310,13 @@ class CodebaseIndexer:
             parts.append(f"Summary: {entry.summary}")
         if entry.symbols:
             sym_list = []
-            for sym in entry.symbols[:20]:
+            for sym in entry.symbols[:MAX_SYMBOL_DISPLAY]:
                 prefix = f"  {sym.kind}: "
                 sig = sym.signature if sym.signature else sym.name
                 sym_list.append(f"{prefix}{sig}")
             parts.append("Symbols:\n" + "\n".join(sym_list))
         if entry.imports:
-            parts.append(f"Imports: {', '.join(entry.imports[:15])}")
+            parts.append(f"Imports: {', '.join(entry.imports[:MAX_IMPORT_DISPLAY])}")
 
         return "\n".join(parts)
 
@@ -683,14 +701,14 @@ class CodebaseIndexer:
             if match:
                 symbols.append(Symbol(
                     name=match.group(1), kind="function", file=file_path, line=i,
-                    signature=stripped[:100],
+                    signature=stripped[:MAX_SIGNATURE_LENGTH],
                 ))
             # Match class-like patterns
             match = re.match(r'(?:class|struct|interface|trait|enum|type)\s+(\w+)', stripped)
             if match:
                 symbols.append(Symbol(
                     name=match.group(1), kind="class", file=file_path, line=i,
-                    signature=stripped[:100],
+                    signature=stripped[:MAX_SIGNATURE_LENGTH],
                 ))
 
         return symbols
@@ -739,7 +757,7 @@ class CodebaseIndexer:
             return ""
 
         # Truncate for summary prompt
-        truncated = content[:3000]
+        truncated = content[:MAX_SUMMARY_CONTENT]
         prompt = (
             f"Write a one-line summary (max 80 chars) of what this file does.\n"
             f"File: {path}\n\n```\n{truncated}\n```"
@@ -752,7 +770,7 @@ class CodebaseIndexer:
                 timeout=30,
                 temperature=0.1,
             )
-            return result.get("response", "").strip()[:100]
+            return result.get("response", "").strip()[:MAX_SUMMARY_LENGTH]
         except Exception:
             return ""
 
@@ -969,6 +987,9 @@ class CodebaseTool:
 
     def _search(self, query: str, max_results: int = 10) -> str:
         """Search the codebase."""
+        if not query or not query.strip():
+            return "Search query cannot be empty"
+        max_results = min(max(1, max_results), MAX_SEARCH_RESULTS)
         results = self._indexer.search(query, max_results=max_results)
         if not results:
             return f"No results found for: {query}"
@@ -977,7 +998,7 @@ class CodebaseTool:
         for r in results:
             lines.append(f"  {r.file}:{r.line}  {r.content}")
             if r.context:
-                lines.append(f"    {r.context[:100]}")
+                lines.append(f"    {r.context[:MAX_CONTEXT_PREVIEW]}")
         return "\n".join(lines)
 
     def _find_symbol(self, name: str) -> str:
@@ -991,7 +1012,7 @@ class CodebaseTool:
             lines.append(f"  {s.kind}: {s.signature or s.name}")
             lines.append(f"    {s.file}:{s.line}")
             if s.docstring:
-                lines.append(f"    {s.docstring[:100]}")
+                lines.append(f"    {s.docstring[:MAX_CONTEXT_PREVIEW]}")
         return "\n".join(lines)
 
     def _overview(self) -> str:
