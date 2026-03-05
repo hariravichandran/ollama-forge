@@ -19,6 +19,16 @@ from forge.utils.logging import get_logger
 
 log = get_logger("llm.benchmark")
 
+# Benchmark version — increment when prompts change to track comparability
+BENCHMARK_VERSION = "1.0"
+
+# Limits
+MAX_MODELS_PER_RUN = 20
+BENCHMARK_TIMEOUT = 120  # per-prompt timeout in seconds
+
+# Required fields in prompt definitions
+REQUIRED_PROMPT_FIELDS = {"name", "prompt"}
+
 # Standardized prompts across difficulty levels
 BENCHMARK_PROMPTS = [
     {
@@ -140,6 +150,19 @@ def run_benchmark(
     if prompts is None:
         prompts = BENCHMARK_PROMPTS
 
+    # Validate model count
+    if len(models) > MAX_MODELS_PER_RUN:
+        log.warning("Too many models (%d), limiting to %d", len(models), MAX_MODELS_PER_RUN)
+        models = models[:MAX_MODELS_PER_RUN]
+
+    # Validate prompt structure
+    for i, p in enumerate(prompts):
+        missing = REQUIRED_PROMPT_FIELDS - set(p.keys())
+        if missing:
+            log.error("Prompt %d missing required fields: %s", i, missing)
+            prompts = BENCHMARK_PROMPTS  # fall back to defaults
+            break
+
     summaries = []
 
     for model in models:
@@ -151,12 +174,15 @@ def run_benchmark(
             client.warmup()
 
         for prompt_info in prompts:
-            name = prompt_info["name"]
+            name = prompt_info.get("name", f"prompt_{id(prompt_info)}")
             category = prompt_info.get("category", "general")
             prompt_text = prompt_info["prompt"]
 
             if progress_cb:
-                progress_cb(model, name, None)
+                try:
+                    progress_cb(model, name, None)
+                except Exception as e:
+                    log.debug("Progress callback error: %s", e)
 
             start = time.time()
             result = client.generate(
@@ -179,7 +205,10 @@ def run_benchmark(
             summary.results.append(bench_result)
 
             if progress_cb:
-                progress_cb(model, name, bench_result)
+                try:
+                    progress_cb(model, name, bench_result)
+                except Exception as e:
+                    log.debug("Progress callback error: %s", e)
 
             log.info(
                 "  %s: %d tokens in %.1fs (%.1f tok/s)%s",

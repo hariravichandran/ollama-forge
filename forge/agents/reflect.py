@@ -17,6 +17,7 @@ first draft and a reviewed answer.
 
 from __future__ import annotations
 
+import re
 from typing import Any
 
 from forge.agents.base import BaseAgent, AgentConfig
@@ -25,6 +26,17 @@ from forge.llm.client import OllamaClient
 from forge.utils.logging import get_logger
 
 log = get_logger("agents.reflect")
+
+# Limits
+MAX_REVISIONS = 5  # hard cap on revision rounds
+MIN_REVISIONS = 0  # 0 = reflection disabled
+MIN_RESPONSE_LENGTH = 30  # responses shorter than this skip review
+MAX_QUESTION_LENGTH = 500  # truncate question context in review prompts
+MAX_RESPONSE_LENGTH = 2000  # truncate response context in review prompts
+MAX_REVIEW_FEEDBACK_LENGTH = 500  # truncate review feedback in revision prompts
+
+# LGTM detection — word boundary match (not embedded in other words)
+LGTM_PATTERN = re.compile(r"\bLGTM\b", re.IGNORECASE)
 
 REVIEW_PROMPT_SHORT = """Review this short response for accuracy and completeness.
 
@@ -97,7 +109,9 @@ class ReflectiveAgent(BaseAgent):
             working_dir=working_dir,
             permissions=permissions,
         )
-        self.max_revisions = max_revisions
+        self.max_revisions = min(max(max_revisions, MIN_REVISIONS), MAX_REVISIONS)
+        if max_revisions != self.max_revisions:
+            log.warning("max_revisions clamped from %d to %d", max_revisions, self.max_revisions)
         self._review_count = 0
         self._revision_count = 0
         self._issue_categories: dict[str, int] = {}  # tracks issue types found
@@ -108,7 +122,7 @@ class ReflectiveAgent(BaseAgent):
         response = super().chat(user_message)
 
         # Don't review very short responses or error messages
-        if len(response) < 30 or response.startswith("LLM error:"):
+        if len(response) < MIN_RESPONSE_LENGTH or response.startswith("LLM error:"):
             return response
 
         # Review and potentially revise (up to max_revisions times)
@@ -137,10 +151,9 @@ class ReflectiveAgent(BaseAgent):
     @staticmethod
     def _categorize_issues(review_text: str) -> list[str]:
         """Extract issue categories from review text."""
-        import re
         categories = []
         text_lower = review_text.lower()
-        if re.search(r"(incorrect|wrong|inaccurat|factual|false)", text_lower):
+        if re.search(r"(incorrect|wrong|inaccurate|factual|false)", text_lower):
             categories.append("factual")
         if re.search(r"(incomplete|missing|doesn.t address|partial)", text_lower):
             categories.append("completeness")
@@ -160,8 +173,8 @@ class ReflectiveAgent(BaseAgent):
 
         prompt_template = self._select_review_prompt(response)
         review_prompt = prompt_template.format(
-            question=question[:500],
-            response=response[:2000],
+            question=question[:MAX_QUESTION_LENGTH],
+            response=response[:MAX_RESPONSE_LENGTH],
         )
 
         review_result = self.client.generate(
@@ -177,7 +190,7 @@ class ReflectiveAgent(BaseAgent):
         review_text = review_result.get("response", "").strip()
 
         # Check if review approves the response
-        if "LGTM" in review_text.upper() or not review_text:
+        if not review_text or LGTM_PATTERN.search(review_text):
             log.debug("Self-review: LGTM (no changes needed)")
             return response
 
@@ -193,9 +206,9 @@ class ReflectiveAgent(BaseAgent):
         # Generate a revised response with targeted feedback
         revised_result = self.client.generate(
             prompt=(
-                f"Original question: {question[:500]}\n\n"
+                f"Original question: {question[:MAX_QUESTION_LENGTH]}\n\n"
                 f"Your initial answer had these issues ({', '.join(categories)}):\n"
-                f"{review_text[:500]}\n\n"
+                f"{review_text[:MAX_REVIEW_FEEDBACK_LENGTH]}\n\n"
                 f"Please provide a corrected, complete answer addressing all issues."
             ),
             system=self._system_prompt,

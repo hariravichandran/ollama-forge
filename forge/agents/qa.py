@@ -17,7 +17,9 @@ introduced by the change.
 from __future__ import annotations
 
 import os
+import re
 import subprocess
+import sys
 import tempfile
 import textwrap
 from pathlib import Path
@@ -27,6 +29,25 @@ from forge.llm.client import OllamaClient
 from forge.utils.logging import get_logger
 
 log = get_logger("agents.qa")
+
+# Timeouts (seconds)
+EXISTING_TEST_TIMEOUT = 120
+GENERATED_TEST_TIMEOUT = 60
+
+# File content limits
+MAX_FILE_CONTENT_LENGTH = 3000
+MAX_TEST_GEN_CONTENT_LENGTH = 2000
+MAX_DIFF_PREVIEW_LENGTH = 2000
+MAX_TEST_DIFF_LENGTH = 1500
+MAX_REVIEW_FILES = 5
+MAX_TEST_GEN_FILES = 3
+
+# Dangerous patterns in generated test code — reject before running
+DANGEROUS_TEST_PATTERNS = re.compile(
+    r"(os\.system|subprocess\.call.*shell\s*=\s*True|shutil\.rmtree\s*\(\s*['\"/]"
+    r"|open\s*\(.*/etc/|eval\s*\(|exec\s*\()",
+    re.IGNORECASE,
+)
 
 
 class QAAgent:
@@ -114,13 +135,13 @@ class QAAgent:
         """
         # Read the changed files
         file_contents = {}
-        for f in files_changed[:5]:  # limit to 5 files
+        for f in files_changed[:MAX_REVIEW_FILES]:
             path = self.repo_dir / f
             if path.exists():
                 try:
                     content = path.read_text()
-                    if len(content) > 3000:
-                        content = content[:3000] + "\n... (truncated)"
+                    if len(content) > MAX_FILE_CONTENT_LENGTH:
+                        content = content[:MAX_FILE_CONTENT_LENGTH] + "\n... (truncated)"
                     file_contents[f] = content
                 except Exception:
                     pass
@@ -134,7 +155,7 @@ class QAAgent:
             prompt=(
                 f"Review these code changes for an open-source Python project:\n\n"
                 f"Changes:\n{files_text}\n\n"
-                f"Diff:\n{diff[:2000] if diff else 'Not available'}\n\n"
+                f"Diff:\n{diff[:MAX_DIFF_PREVIEW_LENGTH] if diff else 'Not available'}\n\n"
                 f"Check for:\n"
                 f"1. Import errors or missing dependencies\n"
                 f"2. Type errors or incorrect function signatures\n"
@@ -158,13 +179,13 @@ class QAAgent:
         """Use LLM to generate test cases for the changes."""
         # Read changed files for context
         file_contents = {}
-        for f in files_changed[:3]:
+        for f in files_changed[:MAX_TEST_GEN_FILES]:
             path = self.repo_dir / f
             if path.exists():
                 try:
                     content = path.read_text()
-                    if len(content) > 2000:
-                        content = content[:2000] + "\n... (truncated)"
+                    if len(content) > MAX_TEST_GEN_CONTENT_LENGTH:
+                        content = content[:MAX_TEST_GEN_CONTENT_LENGTH] + "\n... (truncated)"
                     file_contents[f] = content
                 except Exception:
                     pass
@@ -182,7 +203,7 @@ class QAAgent:
                 f"Generate pytest test cases for these code changes:\n\n"
                 f"Description: {change_description}\n\n"
                 f"Changed files:\n{files_text}\n\n"
-                f"Diff:\n{diff[:1500] if diff else 'Not available'}\n\n"
+                f"Diff:\n{diff[:MAX_TEST_DIFF_LENGTH] if diff else 'Not available'}\n\n"
                 f"Requirements:\n"
                 f"- Write 2-5 focused test functions\n"
                 f"- Use pytest (no unittest)\n"
@@ -215,6 +236,11 @@ class QAAgent:
             log.warning("Generated test code has no test functions")
             return ""
 
+        # Safety check: reject generated tests with dangerous patterns
+        if DANGEROUS_TEST_PATTERNS.search(test_code):
+            log.warning("Generated test code contains dangerous patterns, rejecting")
+            return ""
+
         return test_code
 
     def _run_generated_tests(self, test_code: str) -> tuple[bool, str]:
@@ -231,9 +257,9 @@ class QAAgent:
 
             try:
                 result = subprocess.run(
-                    ["python", "-m", "pytest", str(test_file), "-v", "--tb=short"],
+                    [sys.executable, "-m", "pytest", str(test_file), "-v", "--tb=short"],
                     capture_output=True, text=True,
-                    timeout=60, cwd=str(self.repo_dir),
+                    timeout=GENERATED_TEST_TIMEOUT, cwd=str(self.repo_dir),
                 )
                 output = result.stdout + result.stderr
                 passed = result.returncode == 0
@@ -255,9 +281,9 @@ class QAAgent:
         """Run the existing test suite as a regression check."""
         try:
             result = subprocess.run(
-                ["python", "-m", "pytest", "tests/", "-x", "--tb=short", "-q"],
+                [sys.executable, "-m", "pytest", "tests/", "-x", "--tb=short", "-q"],
                 capture_output=True, text=True,
-                timeout=120, cwd=str(self.repo_dir),
+                timeout=EXISTING_TEST_TIMEOUT, cwd=str(self.repo_dir),
             )
             if result.returncode != 0:
                 log.warning("Existing tests failed:\n%s", result.stderr[-500:])

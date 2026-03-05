@@ -14,6 +14,16 @@ from forge.utils.logging import get_logger
 
 log = get_logger("hardware.profiles")
 
+# System resource reservations
+OS_MEMORY_RESERVATION_GB = 4.0  # GB reserved for OS + other apps
+OS_THREAD_RESERVATION = 2  # threads reserved for OS
+CPU_MAX_BATCH_SIZE = 512  # smaller batches are faster on CPU
+LOW_RAM_THRESHOLD_GB = 8  # below this, force smallest models
+LOW_RAM_CONTEXT = 2048  # context size for very low RAM systems
+
+# Valid profile names
+VALID_PROFILE_NAMES = {"compact", "standard", "workstation", "high_memory"}
+
 
 @dataclass
 class HardwareProfile:
@@ -93,7 +103,7 @@ def select_profile(hw: HardwareInfo) -> HardwareProfile:
         # CPU-only: use RAM to determine model size
         # Ollama loads models into RAM when no GPU is available
         # Leave ~4 GB for OS + other apps
-        available_ram = max(0, hw.ram_gb - 4.0)
+        available_ram = max(0, hw.ram_gb - OS_MEMORY_RESERVATION_GB)
         gpu_gb = available_ram
         log.info("CPU-only mode: using %.1f GB RAM for models (%.1f GB total)", available_ram, hw.ram_gb)
     elif hw.gpu.is_igpu:
@@ -114,14 +124,14 @@ def select_profile(hw: HardwareInfo) -> HardwareProfile:
     if is_cpu_only:
         selected.is_cpu_only = True
         # CPU inference benefits from more threads and smaller batches
-        selected.max_threads = max(1, hw.cpu.threads - 2)  # leave 2 threads for OS
-        selected.num_batch = min(selected.num_batch, 512)  # smaller batches are faster on CPU
+        selected.max_threads = max(1, hw.cpu.threads - OS_THREAD_RESERVATION)
+        selected.num_batch = min(selected.num_batch, CPU_MAX_BATCH_SIZE)
 
-        # For very low RAM systems (< 8 GB), force the smallest model
-        if hw.ram_gb < 8:
+        # For very low RAM systems, force the smallest model
+        if hw.ram_gb < LOW_RAM_THRESHOLD_GB:
             selected.recommended_model = "qwen2.5-coder:1.5b"
             selected.fallback_model = "qwen2.5-coder:0.5b"
-            selected.num_ctx = 2048
+            selected.num_ctx = LOW_RAM_CONTEXT
 
     log.info("Selected profile: %s (%.1f GB %s, %d threads%s)",
              selected.name, gpu_gb,
