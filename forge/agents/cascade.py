@@ -81,6 +81,14 @@ class CascadeAgent(BaseAgent):
         self._is_escalated = False
         self._primary_model = self.cascade.primary_model or client.model
         self._escalation_model = self.cascade.escalation_model
+        # Escalation metrics
+        self._escalation_count = 0
+        self._deescalation_count = 0
+        self._escalation_successes = 0  # escalation led to good response
+
+        # Warn if primary and escalation are the same
+        if self._primary_model and self._escalation_model and self._primary_model == self._escalation_model:
+            log.warning("Primary and escalation models are the same: %s", self._primary_model)
 
     def chat(self, user_message: str) -> str:
         """Chat with automatic model escalation on poor responses."""
@@ -100,8 +108,10 @@ class CascadeAgent(BaseAgent):
             self._consecutive_poor = 0
 
             # De-escalate after successful response from bigger model
-            if self._is_escalated and self.cascade.auto_deescalate:
-                self._deescalate()
+            if self._is_escalated:
+                self._escalation_successes += 1
+                if self.cascade.auto_deescalate:
+                    self._deescalate()
 
         return response
 
@@ -145,6 +155,7 @@ class CascadeAgent(BaseAgent):
         self.client.switch_model(self._escalation_model)
         self._is_escalated = True
         self._consecutive_poor = 0
+        self._escalation_count += 1
 
         # Remove the poor response and retry
         if self.messages and self.messages[-1]["role"] == "assistant":
@@ -169,6 +180,7 @@ class CascadeAgent(BaseAgent):
         log.info("De-escalating from %s to %s", self._escalation_model, self._primary_model)
         self.client.switch_model(self._primary_model)
         self._is_escalated = False
+        self._deescalation_count += 1
 
     def get_stats(self) -> dict[str, Any]:
         """Get stats including cascade information."""
@@ -178,6 +190,12 @@ class CascadeAgent(BaseAgent):
             "escalation_model": self._escalation_model,
             "is_escalated": self._is_escalated,
             "consecutive_poor": self._consecutive_poor,
+            "escalation_count": self._escalation_count,
+            "deescalation_count": self._deescalation_count,
+            "escalation_successes": self._escalation_successes,
+            "escalation_success_rate": round(
+                self._escalation_successes / max(1, self._escalation_count), 2
+            ),
         }
         return stats
 

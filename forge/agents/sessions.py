@@ -35,6 +35,11 @@ log = get_logger("agents.sessions")
 
 SESSIONS_DIR = Path.home() / ".config" / "ollama-forge" / "sessions"
 
+# Session limits
+MAX_SESSION_SIZE_MB = 10  # Maximum session file size
+MAX_MESSAGES_PER_SESSION = 10_000  # Max messages in a single session
+MAX_SESSIONS_ON_DISK = 1000  # Cleanup oldest sessions beyond this
+
 
 @dataclass
 class Session:
@@ -141,10 +146,27 @@ class SessionManager:
 
         session.updated_at = now
 
+        # Enforce message limit
+        if len(messages) > MAX_MESSAGES_PER_SESSION:
+            log.warning("Session %s has %d messages (max %d), truncating",
+                        session_id, len(messages), MAX_MESSAGES_PER_SESSION)
+            session.messages = messages[-MAX_MESSAGES_PER_SESSION:]
+
         # Write to disk
         session_path = self.sessions_dir / f"{session_id}.json"
-        session_path.write_text(json.dumps(asdict(session), indent=2))
-        log.info("Saved session %s (%d messages)", session_id, len(messages))
+        content = json.dumps(asdict(session), indent=2)
+
+        # Check size before writing
+        size_mb = len(content.encode("utf-8")) / (1024 * 1024)
+        if size_mb > MAX_SESSION_SIZE_MB:
+            log.warning("Session %s too large (%.1f MB), truncating messages", session_id, size_mb)
+            # Keep only the last half of messages
+            half = len(session.messages) // 2
+            session.messages = session.messages[half:]
+            content = json.dumps(asdict(session), indent=2)
+
+        session_path.write_text(content)
+        log.info("Saved session %s (%d messages)", session_id, len(session.messages))
         return session_id
 
     def load(self, session_id: str) -> Session | None:
@@ -166,8 +188,23 @@ class SessionManager:
                 return None
 
         try:
-            data = json.loads(session_path.read_text())
+            raw = session_path.read_text(encoding="utf-8", errors="replace")
+            data = json.loads(raw)
+            # Validate required fields
+            if "session_id" not in data or "messages" not in data:
+                log.error("Session %s missing required fields", session_id)
+                return None
             return Session(**data)
+        except json.JSONDecodeError as e:
+            log.error("Corrupted session file %s: %s", session_id, e)
+            # Try to recover by backing up the corrupted file
+            backup = session_path.with_suffix(".json.corrupted")
+            try:
+                session_path.rename(backup)
+                log.info("Moved corrupted session to %s", backup)
+            except OSError:
+                pass
+            return None
         except Exception as e:
             log.error("Failed to load session %s: %s", session_id, e)
             return None
@@ -340,6 +377,36 @@ Agent: {html_mod.escape(session.agent_name)} | Model: {html_mod.escape(session.m
                 continue
 
         return results
+
+    def cleanup_old_sessions(self) -> int:
+        """Remove oldest sessions if total count exceeds MAX_SESSIONS_ON_DISK.
+
+        Returns number of sessions removed.
+        """
+        session_files = sorted(
+            self.sessions_dir.glob("session-*.json"),
+            key=lambda f: f.stat().st_mtime,
+        )
+        if len(session_files) <= MAX_SESSIONS_ON_DISK:
+            return 0
+
+        to_remove = session_files[:len(session_files) - MAX_SESSIONS_ON_DISK]
+        for f in to_remove:
+            try:
+                f.unlink()
+            except OSError:
+                pass
+        log.info("Cleaned up %d old sessions", len(to_remove))
+        return len(to_remove)
+
+    def get_stats(self) -> dict[str, Any]:
+        """Get session storage statistics."""
+        session_files = list(self.sessions_dir.glob("session-*.json"))
+        total_size = sum(f.stat().st_size for f in session_files if f.exists())
+        return {
+            "session_count": len(session_files),
+            "total_size_mb": round(total_size / (1024 * 1024), 2),
+        }
 
     def _generate_title(self, messages: list[dict[str, str]]) -> str:
         """Generate a title from the first user message."""

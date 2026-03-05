@@ -27,6 +27,12 @@ log = get_logger("agents.memory")
 
 DEFAULT_MEMORY_DIR = Path.home() / ".config" / "ollama-forge" / "memory"
 
+# Fact limits
+MAX_FACTS = 500  # Maximum number of facts to store
+MAX_FACT_KEY_LENGTH = 100
+MAX_FACT_VALUE_LENGTH = 1000
+FACT_TTL_DAYS = 90  # Facts older than this are pruned on load
+
 
 @dataclass
 class MemoryFact:
@@ -69,8 +75,11 @@ class ConversationMemory:
         self.memory_dir.mkdir(parents=True, exist_ok=True)
         self.conversations_dir.mkdir(exist_ok=True)
 
-        # Load facts into memory
+        # Load facts into memory (with TTL pruning)
         self._facts: dict[str, MemoryFact] = self._load_facts()
+        pruned = self._prune_old_facts()
+        if pruned:
+            log.info("Pruned %d expired facts (older than %d days)", pruned, FACT_TTL_DAYS)
 
     def save_conversation(
         self,
@@ -135,7 +144,25 @@ class ConversationMemory:
         If a fact with the same key exists and the value is similar
         (>80% match), it updates the existing fact instead of adding
         a duplicate.
+
+        Validates key/value length and enforces MAX_FACTS limit.
         """
+        # Validate inputs
+        if not key or not key.strip():
+            log.warning("Rejecting fact with empty key")
+            return
+        key = key.strip()[:MAX_FACT_KEY_LENGTH]
+        value = value.strip()[:MAX_FACT_VALUE_LENGTH]
+        if not value:
+            log.warning("Rejecting fact with empty value for key: %s", key)
+            return
+
+        # Enforce fact limit — evict oldest if at capacity
+        if key not in self._facts and len(self._facts) >= MAX_FACTS:
+            oldest_key = min(self._facts, key=lambda k: self._facts[k].timestamp)
+            del self._facts[oldest_key]
+            log.debug("Evicted oldest fact '%s' to stay under limit", oldest_key)
+
         # Check for near-duplicate values under different keys
         for existing_key, existing_fact in self._facts.items():
             if existing_key != key and self._is_similar(existing_fact.value, value):
@@ -240,3 +267,26 @@ class ConversationMemory:
         """Save facts to disk."""
         lines = [json.dumps(asdict(fact)) for fact in self._facts.values()]
         self.facts_file.write_text("\n".join(lines) + "\n" if lines else "")
+
+    def _prune_old_facts(self) -> int:
+        """Remove facts older than FACT_TTL_DAYS. Returns count of pruned facts."""
+        cutoff = time.time() - (FACT_TTL_DAYS * 86400)
+        to_remove = [k for k, f in self._facts.items() if f.timestamp < cutoff]
+        for k in to_remove:
+            del self._facts[k]
+        if to_remove:
+            self._save_facts()
+        return len(to_remove)
+
+    def get_stats(self) -> dict[str, Any]:
+        """Get memory statistics."""
+        if not self._facts:
+            return {"fact_count": 0, "oldest_days": 0, "newest_days": 0}
+        now = time.time()
+        ages = [(now - f.timestamp) / 86400 for f in self._facts.values()]
+        return {
+            "fact_count": len(self._facts),
+            "oldest_days": round(max(ages), 1),
+            "newest_days": round(min(ages), 1),
+            "avg_confidence": round(sum(f.confidence for f in self._facts.values()) / len(self._facts), 2),
+        }

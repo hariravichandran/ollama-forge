@@ -251,7 +251,7 @@ class TestLoadFacts:
             mem = ConversationMemory(memory_dir=tmpdir)
             # Write valid + corrupted line
             facts_file = Path(tmpdir) / "facts.jsonl"
-            valid = json.dumps({"key": "k1", "value": "v1", "source": "s", "timestamp": 1.0})
+            valid = json.dumps({"key": "k1", "value": "v1", "source": "s", "timestamp": time.time()})
             facts_file.write_text(f"{valid}\n{{invalid json\n")
 
             # Reload — should load the valid fact and skip the corrupted one
