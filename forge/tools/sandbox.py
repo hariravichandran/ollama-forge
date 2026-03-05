@@ -159,8 +159,8 @@ class Sandbox:
                     project_link = Path(tmpdir) / "project"
                     try:
                         project_link.symlink_to(str(project_path))
-                    except Exception:
-                        pass
+                    except Exception as e:
+                        log.debug("Could not create project symlink: %s", e)
                 else:
                     log.warning("Project dir does not exist or is not a directory: %s", self.project_dir)
 
@@ -187,8 +187,8 @@ class Sandbox:
             # Cleanup
             try:
                 shutil.rmtree(tmpdir, ignore_errors=True)
-            except Exception:
-                pass
+            except Exception as e:
+                log.debug("Sandbox tmpdir cleanup failed (non-critical): %s", e)
 
     def run_command(
         self,
@@ -226,8 +226,8 @@ class Sandbox:
         finally:
             try:
                 shutil.rmtree(tmpdir, ignore_errors=True)
-            except Exception:
-                pass
+            except Exception as e:
+                log.debug("Sandbox tmpdir cleanup failed (non-critical): %s", e)
 
     def run_tests(
         self,
@@ -355,7 +355,7 @@ class Sandbox:
                         kb = int(line.split()[1])
                         return round(kb / 1024, 1)
         except (OSError, ValueError, IndexError):
-            pass
+            pass  # Expected on non-Linux or if process already exited
         return 0.0
 
     def get_metrics(self) -> dict[str, Any]:

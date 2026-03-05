@@ -318,8 +318,8 @@ class PermissionManager:
             # Periodic rotation check
             if self._audit_write_count % AUDIT_LOG_CHECK_INTERVAL == 0:
                 self._rotate_audit_log()
-        except OSError:
-            pass
+        except OSError as e:
+            log.debug("Audit log write failed: %s", e)
 
     @staticmethod
     def _redact_secrets(text: str) -> str:
@@ -373,8 +373,8 @@ class PermissionManager:
                     decisions[d] = decisions.get(d, 0) + 1
                 except json.JSONDecodeError:
                     continue
-        except OSError:
-            pass
+        except OSError as e:
+            log.debug("Could not read audit log for stats: %s", e)
 
         return {
             "entries": sum(decisions.values()),

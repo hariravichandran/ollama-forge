@@ -143,8 +143,8 @@ class QAAgent:
                     if len(content) > MAX_FILE_CONTENT_LENGTH:
                         content = content[:MAX_FILE_CONTENT_LENGTH] + "\n... (truncated)"
                     file_contents[f] = content
-                except Exception:
-                    pass
+                except Exception as e:
+                    log.debug("Could not read file %s: %s", f, e)
 
         files_text = "\n\n".join(
             f"--- {name} ---\n{content}"
@@ -187,8 +187,8 @@ class QAAgent:
                     if len(content) > MAX_TEST_GEN_CONTENT_LENGTH:
                         content = content[:MAX_TEST_GEN_CONTENT_LENGTH] + "\n... (truncated)"
                     file_contents[f] = content
-                except Exception:
-                    pass
+                except Exception as e:
+                    log.debug("Could not read file %s: %s", f, e)
 
         if not file_contents:
             return ""

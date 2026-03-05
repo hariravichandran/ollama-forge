@@ -160,8 +160,8 @@ class SessionManager:
             try:
                 existing = json.loads(existing_path.read_text())
                 session.created_at = existing.get("created_at", now)
-            except Exception:
-                pass
+            except Exception as e:
+                log.debug("Could not read existing session %s: %s", session_id, e)
 
         session.updated_at = now
 
@@ -221,8 +221,8 @@ class SessionManager:
             try:
                 session_path.rename(backup)
                 log.info("Moved corrupted session to %s", backup)
-            except OSError:
-                pass
+            except OSError as oe:
+                log.warning("Could not backup corrupted session %s: %s", session_id, oe)
             return None
         except Exception as e:
             log.error("Failed to load session %s: %s", session_id, e)
@@ -420,8 +420,8 @@ Agent: {html_mod.escape(session.agent_name)} | Model: {html_mod.escape(session.m
         for f in to_remove:
             try:
                 f.unlink()
-            except OSError:
-                pass
+            except OSError as e:
+                log.debug("Could not remove old session %s: %s", f.name, e)
         log.info("Cleaned up %d old sessions", len(to_remove))
         return len(to_remove)
 

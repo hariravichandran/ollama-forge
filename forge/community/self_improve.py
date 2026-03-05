@@ -212,8 +212,8 @@ class SelfImproveAgent:
             try:
                 self._git_run("checkout", "main")
                 self._git_run("branch", "-D", branch_name)
-            except Exception:
-                pass
+            except Exception as e:
+                log.debug("Branch cleanup failed (non-critical): %s", e)
 
         return result
 
@@ -301,8 +301,8 @@ class SelfImproveAgent:
                 chosen = candidates[pick_idx]
                 chosen["evaluation_reason"] = data.get("reason", "")
                 return chosen
-        except (json.JSONDecodeError, ValueError):
-            pass
+        except (json.JSONDecodeError, ValueError) as e:
+            log.debug("Failed to parse LLM candidate evaluation: %s", e)
 
         return candidates[0] if candidates else None
 
@@ -631,8 +631,8 @@ class SelfImproveAgent:
             # Make sure we're back on main
             try:
                 self._git_run("checkout", "main")
-            except Exception:
-                pass
+            except Exception as e2:
+                log.debug("Checkout to main failed during error recovery: %s", e2)
             return False
 
     # ─── Git helpers ─────────────────────────────────────────────────────────
@@ -649,8 +649,8 @@ class SelfImproveAgent:
         for f in files:
             try:
                 self._git_run("checkout", "--", f)
-            except Exception:
-                pass
+            except Exception as e:
+                log.warning("Failed to restore file %s: %s", f, e)
 
     def _git_run(self, *args: str) -> str:
         """Run a git command."""
@@ -707,8 +707,8 @@ class SelfImproveAgent:
         if self.state_file.exists():
             try:
                 return json.loads(self.state_file.read_text())
-            except (json.JSONDecodeError, OSError):
-                pass
+            except (json.JSONDecodeError, OSError) as e:
+                log.warning("Failed to load self-improve state: %s", e)
         return {}
 
     def _save_state(self) -> None:

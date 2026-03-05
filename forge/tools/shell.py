@@ -126,12 +126,9 @@ class ShellTool:
     @staticmethod
     def _kill_process_tree(timeout_error: subprocess.TimeoutExpired) -> None:
         """Attempt graceful shutdown of timed-out process."""
-        try:
-            # The TimeoutExpired exception doesn't hold the process directly
-            # when using subprocess.run, but we log the attempt
-            log.debug("Process timed out, OS will clean up child processes")
-        except Exception:
-            pass
+        # The TimeoutExpired exception doesn't hold the process directly
+        # when using subprocess.run, but we log the attempt
+        log.debug("Process timed out, OS will clean up child processes")
 
     def get_duration_stats(self) -> dict[str, Any]:
         """Get command execution duration statistics."""

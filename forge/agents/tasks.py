@@ -219,8 +219,8 @@ class TaskManager:
         if proc:
             try:
                 proc.kill()
-            except Exception:
-                pass
+            except Exception as e:
+                log.debug("Could not kill process for task %s: %s", task_id, e)
 
         task.status = TaskStatus.CANCELLED
         task.completed_at = time.time()

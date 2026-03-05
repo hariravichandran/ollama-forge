@@ -252,8 +252,8 @@ class EditPlanner:
             for path, content in backups.items():
                 try:
                     (self.working_dir / path).write_text(content)
-                except Exception:
-                    pass
+                except Exception as e:
+                    log.warning("Failed to rollback %s: %s", path, e)
             result.rolled_back = True
             log.info("Rolled back all changes due to failure")
 

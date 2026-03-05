@@ -21,9 +21,12 @@ Usage:
 from __future__ import annotations
 
 import json
+import logging
 import time
 import uuid
 from typing import Any
+
+log = logging.getLogger("forge.api.openai_compat")
 
 # API limits
 MAX_MESSAGES = 200  # max messages in a single chat request
@@ -297,8 +300,8 @@ def create_app():
             )
             if r.status_code == 200:
                 return r.json()
-        except Exception:
-            pass
+        except Exception as e:
+            log.warning("FIM generation failed: %s", e)
         return {"response": "", "tokens": 0}
 
     def _stream_fim_response(client, request):
@@ -349,8 +352,8 @@ def create_app():
                         yield f"data: {json.dumps(chunk)}\n\n"
                     if data.get("done"):
                         break
-        except Exception:
-            pass
+        except Exception as e:
+            log.warning("FIM streaming error: %s", e)
 
         # Final chunk
         chunk = {
