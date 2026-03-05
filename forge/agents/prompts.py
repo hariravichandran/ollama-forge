@@ -13,6 +13,9 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+# Default fallback prompt when template not found
+DEFAULT_SYSTEM_PROMPT = "You are a helpful AI assistant. Be concise and practical."
+
 
 @dataclass
 class PromptTemplate:
@@ -213,7 +216,7 @@ def get_prompt(template_name: str, **kwargs) -> str:
     """
     tmpl = PROMPT_TEMPLATES.get(template_name)
     if not tmpl:
-        return f"You are a helpful AI assistant. Be concise and practical."
+        return DEFAULT_SYSTEM_PROMPT
 
     prompt = tmpl.template
 

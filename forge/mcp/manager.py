@@ -34,6 +34,8 @@ MCP_NAME_PATTERN = re.compile(r"^[a-zA-Z][a-zA-Z0-9_-]{0,49}$")
 
 # Maximum query/config sizes
 MAX_MCP_NAME_LENGTH = 50
+MAX_INSTALL_CMD_DISPLAY = 100  # truncation for install command in error messages
+MAX_STDERR_DISPLAY = 100  # truncation for stderr in retry warnings
 
 
 class MCPManager:
@@ -98,7 +100,7 @@ class MCPManager:
         if not cmd:
             return ""
         if DANGEROUS_INSTALL_PATTERNS.search(cmd):
-            return f"Install command contains dangerous shell patterns: {cmd[:100]}"
+            return f"Install command contains dangerous shell patterns: {cmd[:MAX_INSTALL_CMD_DISPLAY]}"
         return ""
 
     def enable(self, name: str, config: dict[str, Any] | None = None) -> str:
@@ -130,7 +132,7 @@ class MCPManager:
                         delay = MCP_INSTALL_BACKOFF_BASE ** (attempt + 1)
                         log.warning(
                             "MCP install attempt %d failed, retrying in %.0fs: %s",
-                            attempt + 1, delay, result.stderr[:100],
+                            attempt + 1, delay, result.stderr[:MAX_STDERR_DISPLAY],
                         )
                         time.sleep(delay)
                 except subprocess.TimeoutExpired:

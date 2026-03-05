@@ -30,6 +30,9 @@ RULES_FILENAMES = [".forge-rules", "FORGE.md", "CLAUDE.md"]
 # Global rules location
 GLOBAL_RULES_PATH = Path.home() / ".config" / "ollama-forge" / "rules.md"
 
+# Size limit for rules files (prevent loading huge files)
+MAX_RULES_FILE_SIZE = 100_000  # 100 KB
+
 
 def load_project_rules(working_dir: str = ".") -> str:
     """Load and merge rules from global, project, and directory levels.
@@ -96,6 +99,10 @@ def _read_rules_file(path: Path) -> str:
     """Read a rules file if it exists."""
     if path.exists() and path.is_file():
         try:
+            if path.stat().st_size > MAX_RULES_FILE_SIZE:
+                log.warning("Rules file %s too large (%d bytes, max %d), skipping",
+                            path, path.stat().st_size, MAX_RULES_FILE_SIZE)
+                return ""
             content = path.read_text().strip()
             if content:
                 log.debug("Read rules from %s", path)

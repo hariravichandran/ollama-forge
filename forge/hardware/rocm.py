@@ -12,6 +12,17 @@ from forge.utils.logging import get_logger
 
 log = get_logger("hardware.rocm")
 
+# Subprocess timeouts
+ROCMINFO_TIMEOUT = 10  # seconds for rocminfo query
+GROUPS_TIMEOUT = 5  # seconds for groups query
+
+# ROCm version file
+ROCM_VERSION_FILE = Path("/opt/rocm/.info/version")
+
+# iGPU vs discrete model limits
+IGPU_MAX_LOADED_MODELS = "1"
+DGPU_MAX_LOADED_MODELS = "2"
+
 # Known GFX version overrides for AMD APUs/GPUs that need HSA_OVERRIDE_GFX_VERSION.
 # Maps GFX architecture IDs to the required override version string.
 #
@@ -72,11 +83,11 @@ def configure_rocm_env(gpu: GPUInfo) -> dict[str, str]:
 
     # Max loaded models — prevent OOM on iGPUs
     if gpu.is_igpu:
-        os.environ.setdefault("OLLAMA_MAX_LOADED_MODELS", "1")
-        env_vars["OLLAMA_MAX_LOADED_MODELS"] = "1"
+        os.environ.setdefault("OLLAMA_MAX_LOADED_MODELS", IGPU_MAX_LOADED_MODELS)
+        env_vars["OLLAMA_MAX_LOADED_MODELS"] = IGPU_MAX_LOADED_MODELS
     else:
-        os.environ.setdefault("OLLAMA_MAX_LOADED_MODELS", "2")
-        env_vars["OLLAMA_MAX_LOADED_MODELS"] = "2"
+        os.environ.setdefault("OLLAMA_MAX_LOADED_MODELS", DGPU_MAX_LOADED_MODELS)
+        env_vars["OLLAMA_MAX_LOADED_MODELS"] = DGPU_MAX_LOADED_MODELS
 
     return env_vars
 
@@ -107,7 +118,7 @@ def _get_gfx_from_rocminfo() -> str:
     try:
         result = subprocess.run(
             ["rocminfo"],
-            capture_output=True, text=True, timeout=10,
+            capture_output=True, text=True, timeout=ROCMINFO_TIMEOUT,
         )
         if result.returncode == 0:
             match = re.search(r"Name:\s+(gfx\d+)", result.stdout)
@@ -151,7 +162,7 @@ def get_rocm_status() -> dict[str, str]:
     status: dict[str, str] = {}
 
     # ROCm version
-    version_file = Path("/opt/rocm/.info/version")
+    version_file = ROCM_VERSION_FILE
     if version_file.exists():
         status["rocm_version"] = version_file.read_text().strip()
     else:
@@ -172,7 +183,7 @@ def get_rocm_status() -> dict[str, str]:
 
     # User groups (check required + optional)
     try:
-        result = subprocess.run(["groups"], capture_output=True, text=True, timeout=5)
+        result = subprocess.run(["groups"], capture_output=True, text=True, timeout=GROUPS_TIMEOUT)
         groups = set(result.stdout.strip().split())
         for g in ROCM_REQUIRED_GROUPS:
             status[f"{g}_group"] = "yes" if g in groups else "no"
@@ -200,7 +211,7 @@ def generate_ollama_service_env(gpu: GPUInfo) -> str:
 
     lines.append('Environment="OLLAMA_FLASH_ATTENTION=1"')
 
-    max_models = "1" if gpu.is_igpu else "2"
+    max_models = IGPU_MAX_LOADED_MODELS if gpu.is_igpu else DGPU_MAX_LOADED_MODELS
     lines.append(f'Environment="OLLAMA_MAX_LOADED_MODELS={max_models}"')
 
     return "\n".join(lines)

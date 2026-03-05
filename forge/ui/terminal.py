@@ -20,6 +20,9 @@ from __future__ import annotations
 import time
 from typing import Any
 
+# Display limits
+MAX_MODELS_DISPLAY = 10  # max models to show in list command
+
 
 def launch_tui(
     model: str = "",
@@ -354,7 +357,7 @@ if TEXTUAL_AVAILABLE:
                 if arg:
                     self._switch_model(arg)
                 else:
-                    models_str = ", ".join(self._available_models[:10])
+                    models_str = ", ".join(self._available_models[:MAX_MODELS_DISPLAY])
                     self._add_system_message(f"Available models: {models_str}")
             elif cmd == "/agent":
                 if arg:
