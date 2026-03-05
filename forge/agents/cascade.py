@@ -27,9 +27,14 @@ log = get_logger("agents.cascade")
 
 # Number of consecutive poor responses before escalating
 ESCALATION_THRESHOLD = 3
+MIN_ESCALATION_THRESHOLD = 1
+MAX_ESCALATION_THRESHOLD = 20
 
 # Minimum response length to be considered "useful"
 MIN_USEFUL_LENGTH = 50
+
+# Limits
+MAX_CONSECUTIVE_POOR = 50  # hard cap to avoid unbounded counter
 
 # Patterns that indicate the model is stuck
 STUCK_PATTERNS = [
@@ -49,7 +54,7 @@ class CascadeConfig:
 
     primary_model: str = ""      # default model (auto-detected)
     escalation_model: str = ""   # bigger model to switch to when stuck
-    escalation_threshold: int = ESCALATION_THRESHOLD
+    escalation_threshold: int = ESCALATION_THRESHOLD  # validated in CascadeAgent.__init__
     auto_deescalate: bool = True  # return to primary after successful escalation
 
 
@@ -77,6 +82,11 @@ class CascadeAgent(BaseAgent):
     ):
         super().__init__(client=client, config=config, working_dir=working_dir)
         self.cascade = cascade_config or CascadeConfig()
+        # Validate escalation threshold
+        self.cascade.escalation_threshold = min(
+            max(self.cascade.escalation_threshold, MIN_ESCALATION_THRESHOLD),
+            MAX_ESCALATION_THRESHOLD,
+        )
         self._consecutive_poor = 0
         self._is_escalated = False
         self._primary_model = self.cascade.primary_model or client.model
@@ -95,7 +105,7 @@ class CascadeAgent(BaseAgent):
         response = super().chat(user_message)
 
         if self._is_poor_response(response):
-            self._consecutive_poor += 1
+            self._consecutive_poor = min(self._consecutive_poor + 1, MAX_CONSECUTIVE_POOR)
             log.info(
                 "Poor response detected (%d/%d before escalation)",
                 self._consecutive_poor,

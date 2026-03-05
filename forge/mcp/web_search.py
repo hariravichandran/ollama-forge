@@ -11,6 +11,15 @@ from forge.utils.logging import get_logger
 
 log = get_logger("mcp.web_search")
 
+# Query limits
+MAX_QUERY_LENGTH = 500
+MAX_SEARCH_RESULTS = 20  # hard cap on results per query
+MIN_CACHE_TTL = 60  # 1 minute minimum
+MAX_CACHE_TTL = 86400  # 24 hours maximum
+MAX_CACHE_ENTRIES = 500  # evict oldest when exceeded
+MAX_BUILD_CONTEXT_QUERIES = 10  # max queries in build_context
+MAX_BUILD_CONTEXT_RESULTS = 3  # results per query in build_context
+
 
 class WebSearchMCP:
     """Built-in web search MCP server using DuckDuckGo.
@@ -25,8 +34,8 @@ class WebSearchMCP:
         cache_ttl: int = 6 * 3600,
         cache_dir: str = ".forge_state",
     ):
-        self.max_results = max_results
-        self.cache_ttl = cache_ttl
+        self.max_results = min(max(1, max_results), MAX_SEARCH_RESULTS)
+        self.cache_ttl = min(max(cache_ttl, MIN_CACHE_TTL), MAX_CACHE_TTL)
         self.cache_dir = Path(cache_dir)
         self.cache_dir.mkdir(parents=True, exist_ok=True)
         self.cache_file = self.cache_dir / "web_search_cache.json"
@@ -40,8 +49,12 @@ class WebSearchMCP:
         """
         if not self.enabled:
             return []
+        if not query or not query.strip():
+            return []
+        if len(query) > MAX_QUERY_LENGTH:
+            query = query[:MAX_QUERY_LENGTH]
 
-        n = max_results or self.max_results
+        n = min(max_results or self.max_results, MAX_SEARCH_RESULTS)
 
         # Check cache
         cache_key = f"{query}:{n}"
@@ -90,11 +103,11 @@ class WebSearchMCP:
             return ""
 
         sections = ["RECENT RESEARCH (web search):\n"]
-        for query in queries:
+        for query in queries[:MAX_BUILD_CONTEXT_QUERIES]:
             results = self.search(query)
             if results:
                 sections.append(f"[{query}]")
-                for r in results[:3]:
+                for r in results[:MAX_BUILD_CONTEXT_RESULTS]:
                     title = r.get("title", "")
                     body = r.get("body", "")
                     href = r.get("href", "")
@@ -124,5 +137,9 @@ class WebSearchMCP:
         return None
 
     def _set_cached(self, key: str, data: list[dict]) -> None:
+        # Evict oldest entries if cache is full
+        if len(self._cache) >= MAX_CACHE_ENTRIES:
+            oldest_key = min(self._cache, key=lambda k: self._cache[k].get("ts", 0))
+            del self._cache[oldest_key]
         self._cache[key] = {"data": data, "ts": time.time()}
         self._save_cache()

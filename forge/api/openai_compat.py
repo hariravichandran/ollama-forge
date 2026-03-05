@@ -25,6 +25,15 @@ import time
 import uuid
 from typing import Any
 
+# API limits
+MAX_MESSAGES = 200  # max messages in a single chat request
+MAX_MAX_TOKENS = 32768  # hard cap on max_tokens
+MIN_TEMPERATURE = 0.0
+MAX_TEMPERATURE = 2.0
+MAX_N_COMPLETIONS = 1  # only 1 completion supported (Ollama limitation)
+FIM_DEFAULT_MAX_TOKENS = 256
+FIM_TIMEOUT = 30  # seconds for FIM requests
+
 
 def create_app():
     """Create the FastAPI app for the OpenAI-compatible API."""
@@ -284,7 +293,7 @@ def create_app():
             r = req.post(
                 f"{client.base_url}/api/generate",
                 json=payload,
-                timeout=30,
+                timeout=FIM_TIMEOUT,
             )
             if r.status_code == 200:
                 return r.json()
@@ -317,7 +326,7 @@ def create_app():
                 f"{client.base_url}/api/generate",
                 json=payload,
                 stream=True,
-                timeout=30,
+                timeout=FIM_TIMEOUT,
             )
             for line in r.iter_lines():
                 if line:

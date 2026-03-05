@@ -38,6 +38,16 @@ log = get_logger("agents.autofix")
 
 # Maximum fix attempts before giving up
 MAX_FIX_ATTEMPTS = 3
+MIN_FIX_ATTEMPTS = 1
+MAX_FIX_ATTEMPTS_LIMIT = 10  # hard cap
+
+# Subprocess limits
+CHECK_TIMEOUT = 60  # per-check timeout in seconds
+MAX_OUTPUT_LENGTH = 10_000  # max captured output from a check
+ERROR_PREVIEW_LENGTH = 200  # truncation for error display
+ERROR_CONTEXT_LENGTH = 500  # truncation for error context in fix prompts
+ERROR_SIGNATURE_LENGTH = 100  # truncation for error dedup signatures
+DEBUG_PREVIEW_LENGTH = 300  # truncation for debug logging
 
 
 @dataclass
@@ -100,7 +110,7 @@ class AutoFixer:
         auto_detect: bool = True,
     ):
         self.working_dir = Path(working_dir)
-        self.max_attempts = max_attempts
+        self.max_attempts = min(max(max_attempts, MIN_FIX_ATTEMPTS), MAX_FIX_ATTEMPTS_LIMIT)
         self.checks: list[Check] = []
         self.project_checks: list[Check] = []  # run once, not per-file
 
@@ -187,19 +197,19 @@ class AutoFixer:
 
             if not fix_callback:
                 # No auto-fix available — just report errors
-                final_errors = [f"{r.check_name}: {r.output[:200]}" for r in failures]
+                final_errors = [f"{r.check_name}: {r.output[:ERROR_PREVIEW_LENGTH]}" for r in failures]
                 break
 
             # Infinite loop detection: compare error signatures with previous attempt
             current_error_keys = {
-                f"{r.check_name}:{r.file}:{r.output[:100]}" for r in failures
+                f"{r.check_name}:{r.file}:{r.output[:ERROR_SIGNATURE_LENGTH]}" for r in failures
             }
             if current_error_keys == previous_error_keys:
                 log.warning(
                     "Same errors recurring after fix attempt %d — breaking to avoid infinite loop",
                     attempt + 1,
                 )
-                final_errors = [f"{r.check_name}: {r.output[:200]}" for r in failures]
+                final_errors = [f"{r.check_name}: {r.output[:ERROR_PREVIEW_LENGTH]}" for r in failures]
                 break
             previous_error_keys = current_error_keys
 
@@ -208,7 +218,7 @@ class AutoFixer:
                 error_msg = (
                     f"Check '{failure.check_name}' failed"
                     f"{' for ' + failure.file if failure.file else ''}:\n"
-                    f"{failure.output[:500]}\n\n"
+                    f"{failure.output[:ERROR_CONTEXT_LENGTH]}\n\n"
                     f"Please fix this error."
                 )
                 log.info("Auto-fix attempt %d: %s", attempt + 1, failure.check_name)
@@ -219,7 +229,7 @@ class AutoFixer:
         if not final_errors:
             results = self.run_checks(files_changed)
             failures = [r for r in results if not r.passed]
-            final_errors = [f"{r.check_name}: {r.output[:200]}" for r in failures]
+            final_errors = [f"{r.check_name}: {r.output[:ERROR_PREVIEW_LENGTH]}" for r in failures]
 
         return AutoFixResult(
             all_passed=len(final_errors) == 0,
@@ -243,14 +253,14 @@ class AutoFixer:
                 shell=True,
                 capture_output=True,
                 text=True,
-                timeout=60,
+                timeout=CHECK_TIMEOUT,
                 cwd=str(self.working_dir),
             )
-            output = result.stdout + result.stderr
+            output = (result.stdout + result.stderr)[:MAX_OUTPUT_LENGTH]
             passed = result.returncode == 0
 
             if not passed:
-                log.debug("Check failed: %s\n%s", check.name, output[:300])
+                log.debug("Check failed: %s\n%s", check.name, output[:DEBUG_PREVIEW_LENGTH])
 
             return CheckResult(
                 check_name=check.name,

@@ -34,8 +34,17 @@ MIN_TITLE_LENGTH = 5
 MAX_TITLE_LENGTH = 200
 MAX_DESCRIPTION_LENGTH = 2000
 
-# Fuzzy duplicate detection threshold (Levenshtein-based)
+# Fuzzy duplicate detection threshold (SequenceMatcher-based)
 FUZZY_DEDUP_THRESHOLD = 0.85
+FUZZY_LENGTH_RATIO_MIN = 0.5  # skip comparison if length ratio below this
+FUZZY_LENGTH_RATIO_MAX = 2.0  # skip comparison if length ratio above this
+
+# Display limits
+MAX_DESCRIPTION_DISPLAY = 120  # truncation for description in list view
+MAX_IDEAS_DISPLAY = 100  # max ideas to show in format_ideas
+
+# Valid statuses
+VALID_STATUSES = {"new", "evaluated", "accepted", "rejected", "implemented"}
 
 
 @dataclass
@@ -158,7 +167,7 @@ class IdeaCollector:
             existing_text = f"{existing.title} {existing.description}".lower()
             # Quick length ratio check
             len_ratio = len(new_text) / max(len(existing_text), 1)
-            if len_ratio < 0.5 or len_ratio > 2.0:
+            if len_ratio < FUZZY_LENGTH_RATIO_MIN or len_ratio > FUZZY_LENGTH_RATIO_MAX:
                 continue
             ratio = SequenceMatcher(None, new_text, existing_text).ratio()
             if ratio >= FUZZY_DEDUP_THRESHOLD:
@@ -180,6 +189,8 @@ class IdeaCollector:
 
     def update_status(self, idea_id: str, status: str, reason: str = "") -> str:
         """Update an idea's status (used by self-improvement agent)."""
+        if status not in VALID_STATUSES:
+            return f"Invalid status '{status}'. Must be one of: {', '.join(sorted(VALID_STATUSES))}"
         idea = self._ideas.get(idea_id)
         if not idea:
             return f"Idea {idea_id} not found"
@@ -203,7 +214,7 @@ class IdeaCollector:
                 "implemented": "[done]",
             }.get(idea.status, "[?]")
             lines.append(f"  {status_icon} [{idea.category}] {idea.title} (votes: {idea.votes})")
-            lines.append(f"          {idea.description[:120]}")
+            lines.append(f"          {idea.description[:MAX_DESCRIPTION_DISPLAY]}")
             lines.append("")
         return "\n".join(lines)
 
