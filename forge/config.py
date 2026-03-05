@@ -55,7 +55,7 @@ class ForgeConfig:
     agents_dir: str = "agents"
     state_dir: str = ".forge_state"
 
-    def __post_init__(self):
+    def __post_init__(self) -> None:
         if not self.mcp_config_path:
             self.mcp_config_path = str(CONFIG_DIR / "mcp.yaml")
 

@@ -38,7 +38,7 @@ FIM_DEFAULT_MAX_TOKENS = 256
 FIM_TIMEOUT = 30  # seconds for FIM requests
 
 
-def create_app():
+def create_app() -> Any:
     """Create the FastAPI app for the OpenAI-compatible API."""
     try:
         from fastapi import FastAPI, HTTPException
@@ -369,7 +369,7 @@ def create_app():
     return app
 
 
-def run_api_server(port: int = 8000, host: str = "127.0.0.1"):
+def run_api_server(port: int = 8000, host: str = "127.0.0.1") -> None:
     """Start the API server."""
     try:
         import uvicorn

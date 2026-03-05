@@ -26,7 +26,7 @@ import re
 import subprocess
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, TYPE_CHECKING
+from typing import Any, Generator, TYPE_CHECKING
 
 from forge.utils.logging import get_logger
 
@@ -403,7 +403,7 @@ class EditPlanner:
             return EditPlan(task=task, reasoning=f"LLM plan parsing failed: {e}")
 
 
-def _walk_compat(directory: Path):
+def _walk_compat(directory: Path) -> Generator[tuple[str, list[str], list[str]], None, None]:
     """os.walk compatible fallback for Python < 3.12."""
     import os
     for root, dirs, files in os.walk(directory):

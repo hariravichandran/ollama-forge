@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 import time
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, Generator
 
 from forge.agents.permissions import PermissionManager
 from forge.agents.rules import load_project_rules
@@ -178,7 +178,7 @@ class BaseAgent:
 
         return "Max tool rounds reached. Please try a simpler request."
 
-    def stream_chat(self, user_message: str):
+    def stream_chat(self, user_message: str) -> Generator[dict[str, Any], None, None]:
         """Stream a response, yielding typed event dicts.
 
         Yields dicts with 'type' key: 'text', 'tool_call', 'done', 'error'.

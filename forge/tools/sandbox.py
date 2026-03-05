@@ -26,7 +26,7 @@ import tempfile
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 from forge.utils.logging import get_logger
 
@@ -392,9 +392,9 @@ class Sandbox:
 
         return env
 
-    def _get_preexec_fn(self):
+    def _get_preexec_fn(self) -> Callable[[], None] | None:
         """Get a preexec function that sets resource limits (Linux/macOS)."""
-        def set_limits():
+        def set_limits() -> None:
             try:
                 import resource
                 # CPU time limit
