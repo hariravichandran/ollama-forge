@@ -266,8 +266,8 @@ class MCPManager:
             try:
                 with open(self.config_path) as f:
                     return yaml.safe_load(f) or {}
-            except (yaml.YAMLError, OSError):
-                pass
+            except (yaml.YAMLError, OSError) as e:
+                log.debug("Could not load MCP config: %s", e)
         return {}
 
     def _save_config(self) -> None:

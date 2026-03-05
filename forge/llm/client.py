@@ -160,8 +160,8 @@ class OllamaClient:
             r = self._get_session().get(f"{self.base_url}/api/version", timeout=5)
             if r.status_code == 200:
                 return r.json().get("version", "unknown")
-        except requests.ConnectionError:
-            pass
+        except requests.ConnectionError as e:
+            log.debug("Could not get Ollama version: %s", e)
         return "unavailable"
 
     def list_models(self) -> list[dict[str, Any]]:
@@ -185,8 +185,8 @@ class OllamaClient:
             r = self._get_session().get(f"{self.base_url}/api/ps", timeout=5)
             if r.status_code == 200:
                 return r.json().get("models", [])
-        except requests.ConnectionError:
-            pass
+        except requests.ConnectionError as e:
+            log.debug("Could not list running models: %s", e)
         return []
 
     def pull_model(self, model: str, progress_cb: Callable[[str], None] | None = None) -> bool:
@@ -577,8 +577,8 @@ class OllamaClient:
             )
             if r.status_code == 200:
                 return r.json()
-        except (requests.ConnectionError, requests.Timeout):
-            pass
+        except (requests.ConnectionError, requests.Timeout) as e:
+            log.debug("Could not fetch model info: %s", e)
         return {}
 
     def warmup(self, system: str = "") -> bool:
@@ -606,8 +606,8 @@ class OllamaClient:
             if r.status_code == 200:
                 log.info("Warmed KV cache for %s", self.model)
                 return True
-        except (requests.ConnectionError, requests.Timeout):
-            pass
+        except (requests.ConnectionError, requests.Timeout) as e:
+            log.debug("Could not warm KV cache: %s", e)
         return False
 
     # Maximum image file size (20 MB) — prevents sending huge files to Ollama

@@ -120,15 +120,15 @@ class WebSearchMCP:
         if self.cache_file.exists():
             try:
                 return json.loads(self.cache_file.read_text())
-            except (json.JSONDecodeError, OSError):
-                pass
+            except (json.JSONDecodeError, OSError) as e:
+                log.debug("Could not load web search cache: %s", e)
         return {}
 
     def _save_cache(self) -> None:
         try:
             self.cache_file.write_text(json.dumps(self._cache))
-        except OSError:
-            pass
+        except OSError as e:
+            log.debug("Could not save web search cache: %s", e)
 
     def _get_cached(self, key: str) -> list[dict] | None:
         entry = self._cache.get(key)

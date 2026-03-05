@@ -124,8 +124,8 @@ def _get_gfx_from_rocminfo() -> str:
             match = re.search(r"Name:\s+(gfx\d+)", result.stdout)
             if match:
                 return match.group(1)
-    except (FileNotFoundError, subprocess.TimeoutExpired):
-        pass
+    except (FileNotFoundError, subprocess.TimeoutExpired) as e:
+        log.debug("Could not get GFX from rocminfo: %s", e)
     return ""
 
 
@@ -195,8 +195,8 @@ def get_rocm_status() -> dict[str, str]:
         missing = ROCM_REQUIRED_GROUPS - groups
         if missing:
             status["group_warning"] = f"Missing required groups: {', '.join(sorted(missing))}. Fix with: sudo usermod -aG {','.join(sorted(missing))} $USER"
-    except (FileNotFoundError, subprocess.TimeoutExpired):
-        pass
+    except (FileNotFoundError, subprocess.TimeoutExpired) as e:
+        log.debug("Could not check user groups for ROCm: %s", e)
 
     return status
 

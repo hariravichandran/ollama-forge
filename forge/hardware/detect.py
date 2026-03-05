@@ -225,8 +225,8 @@ def _detect_apple_gpu() -> GPUInfo | None:
                 displays = data.get("SPDisplaysDataType", [])
                 if displays:
                     gpu_cores = displays[0].get("sppci_cores", "")
-        except (json.JSONDecodeError, KeyError):
-            pass
+        except (json.JSONDecodeError, KeyError) as e:
+            log.debug("Could not parse GPU cores from system_profiler: %s", e)
 
         name = chip_name
         if gpu_cores:
@@ -331,8 +331,8 @@ def _read_amd_gpu_name(device_dir: Path) -> str:
                     match = re.search(r"\] (.+)$", line)
                     if match:
                         return match.group(1).strip()
-    except (FileNotFoundError, subprocess.TimeoutExpired):
-        pass
+    except (FileNotFoundError, subprocess.TimeoutExpired) as e:
+        log.debug("Could not read AMD GPU name via lspci: %s", e)
 
     return "AMD GPU"
 
@@ -350,8 +350,8 @@ def _detect_rocm_version() -> str:
                     match = re.search(r"(\d+\.\d+[\.\d]*)", line)
                     if match:
                         return match.group(1)
-    except (FileNotFoundError, subprocess.TimeoutExpired):
-        pass
+    except (FileNotFoundError, subprocess.TimeoutExpired) as e:
+        log.debug("Could not detect ROCm version via rocm-smi: %s", e)
 
     version_file = Path("/opt/rocm/.info/version")
     if version_file.exists():
@@ -410,8 +410,8 @@ def _detect_intel_gpu_linux() -> GPUInfo | None:
                     if ver_path.exists():
                         try:
                             driver_version = ver_path.read_text().strip()
-                        except OSError:
-                            pass
+                        except OSError as e:
+                            log.debug("Could not read driver version from %s: %s", ver_path, e)
                     break
 
             # Detect VRAM from sysfs
@@ -426,8 +426,8 @@ def _detect_intel_gpu_linux() -> GPUInfo | None:
                 driver_version=driver_version,
                 is_igpu=not is_arc,
             )
-    except (FileNotFoundError, subprocess.TimeoutExpired):
-        pass
+    except (FileNotFoundError, subprocess.TimeoutExpired) as e:
+        log.debug("Could not detect Intel GPU via lspci: %s", e)
     return None
 
 
@@ -461,8 +461,8 @@ def _detect_intel_vram_linux() -> float:
             try:
                 vram_bytes = int(vram_path.read_text().strip())
                 return vram_bytes / (1024 ** 3)
-            except (ValueError, OSError):
-                pass
+            except (ValueError, OSError) as e:
+                log.debug("Could not read Intel VRAM from %s: %s", vram_path, e)
 
         # Alternative: lmem_total_bytes
         lmem_path = device_dir / "lmem_total_bytes"
@@ -470,8 +470,8 @@ def _detect_intel_vram_linux() -> float:
             try:
                 lmem_bytes = int(lmem_path.read_text().strip())
                 return lmem_bytes / (1024 ** 3)
-            except (ValueError, OSError):
-                pass
+            except (ValueError, OSError) as e:
+                log.debug("Could not read Intel lmem from %s: %s", lmem_path, e)
 
     return 0.0
 
@@ -514,8 +514,8 @@ def _detect_gpu_windows() -> GPUInfo | None:
                     driver_version=driver_ver,
                     is_igpu=total_gb < 4.0,
                 )
-    except (FileNotFoundError, subprocess.TimeoutExpired, json.JSONDecodeError, ValueError):
-        pass
+    except (FileNotFoundError, subprocess.TimeoutExpired, json.JSONDecodeError, ValueError) as e:
+        log.debug("Could not detect GPU via Windows WMI: %s", e)
     return None
 
 
@@ -652,8 +652,8 @@ def _detect_ram_macos() -> float:
         )
         if result.returncode == 0:
             return int(result.stdout.strip()) / (1024 ** 3)
-    except (FileNotFoundError, subprocess.TimeoutExpired, ValueError):
-        pass
+    except (FileNotFoundError, subprocess.TimeoutExpired, ValueError) as e:
+        log.debug("Could not detect RAM on macOS: %s", e)
     return 0.0
 
 
@@ -667,6 +667,6 @@ def _detect_ram_windows() -> float:
         )
         if result.returncode == 0:
             return int(result.stdout.strip()) / (1024 ** 3)
-    except (FileNotFoundError, subprocess.TimeoutExpired, ValueError):
-        pass
+    except (FileNotFoundError, subprocess.TimeoutExpired, ValueError) as e:
+        log.debug("Could not detect RAM on Windows: %s", e)
     return 0.0
