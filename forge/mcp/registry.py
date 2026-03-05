@@ -299,15 +299,30 @@ MCP_REGISTRY: dict[str, MCPEntry] = {
 }
 
 
+# Valid MCP categories
+VALID_CATEGORIES = {"search", "data", "tools", "productivity", "development", "cloud", "communication", "ai"}
+
+# Query limits
+MAX_SEARCH_QUERY_LENGTH = 200
+
+
 def search_registry(query: str) -> list[MCPEntry]:
     """Search the MCP registry by name, description, or category."""
+    if not query or not query.strip():
+        return list(MCP_REGISTRY.values())
+    # Truncate long queries
+    query = query[:MAX_SEARCH_QUERY_LENGTH]
     query_lower = query.lower()
+    seen = set()  # dedup by name
     results = []
     for entry in MCP_REGISTRY.values():
+        if entry.name in seen:
+            continue
         if (query_lower in entry.name.lower()
                 or query_lower in entry.description.lower()
                 or query_lower in entry.category.lower()):
             results.append(entry)
+            seen.add(entry.name)
     return results
 
 
@@ -316,9 +331,13 @@ def suggest_mcps(context: str) -> list[MCPEntry]:
 
     Simple keyword matching — can be enhanced with LLM-based suggestions.
     """
-    context_lower = context.lower()
+    if not context or not context.strip():
+        return []
+    # Truncate long context to avoid slow processing
+    context_lower = context[:5000].lower()
 
     suggestions = []
+    seen = set()  # dedup
     keyword_map = {
         "github": ["github", "repo", "pull request", "issue", "PR"],
         "gitlab": ["gitlab", "merge request", "MR", "ci/cd"],
@@ -347,9 +366,12 @@ def suggest_mcps(context: str) -> list[MCPEntry]:
     }
 
     for mcp_name, keywords in keyword_map.items():
+        if mcp_name in seen:
+            continue
         if any(kw in context_lower for kw in keywords):
             entry = MCP_REGISTRY.get(mcp_name)
             if entry:
                 suggestions.append(entry)
+                seen.add(mcp_name)
 
     return suggestions

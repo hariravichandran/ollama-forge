@@ -2,8 +2,19 @@
 
 from __future__ import annotations
 
+from pathlib import Path
+
 from forge.agents.base import BaseAgent, AgentConfig
 from forge.llm.client import OllamaClient
+from forge.tools import BUILTIN_TOOLS
+from forge.utils.logging import get_logger
+
+log = get_logger("agents.researcher")
+
+# Temperature bounds for research
+RESEARCHER_TEMPERATURE = 0.5
+MIN_TEMPERATURE = 0.0
+MAX_TEMPERATURE = 2.0
 
 RESEARCHER_SYSTEM_PROMPT = """\
 You are a research assistant running locally via Ollama. Your capabilities:
@@ -24,13 +35,36 @@ Guidelines:
 """
 
 
-def create_researcher_agent(client: OllamaClient, working_dir: str = ".") -> BaseAgent:
-    """Create a researcher agent with optimal settings for research tasks."""
+def create_researcher_agent(
+    client: OllamaClient,
+    working_dir: str = ".",
+    temperature: float = RESEARCHER_TEMPERATURE,
+) -> BaseAgent:
+    """Create a researcher agent with optimal settings for research tasks.
+
+    Validates tool availability and working directory.
+    """
+    # Validate working directory
+    wd = Path(working_dir)
+    if not wd.exists():
+        log.warning("Working directory does not exist: %s, using '.'", working_dir)
+        working_dir = "."
+
+    # Validate and clamp temperature
+    temperature = max(MIN_TEMPERATURE, min(temperature, MAX_TEMPERATURE))
+
+    # Validate tool availability
+    requested_tools = ["web", "filesystem"]
+    available_tools = [t for t in requested_tools if t in BUILTIN_TOOLS]
+    if len(available_tools) < len(requested_tools):
+        missing = set(requested_tools) - set(available_tools)
+        log.warning("Researcher agent: missing tools %s, using available: %s", missing, available_tools)
+
     config = AgentConfig(
         name="researcher",
         system_prompt=RESEARCHER_SYSTEM_PROMPT,
-        tools=["web", "filesystem"],
-        temperature=0.5,
+        tools=available_tools,
+        temperature=temperature,
         description="Research assistant — searches web, summarizes findings",
     )
     return BaseAgent(client=client, config=config, working_dir=working_dir)

@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import re
 import subprocess
+import sys
 import time
 from pathlib import Path
 from typing import Any
@@ -18,6 +20,20 @@ log = get_logger("mcp.manager")
 # Installation retry settings
 MCP_INSTALL_MAX_RETRIES = 3
 MCP_INSTALL_BACKOFF_BASE = 2.0  # seconds
+MCP_INSTALL_TIMEOUT = 120  # seconds
+MCP_HEALTH_CHECK_TIMEOUT = 5  # seconds
+
+# Dangerous shell patterns in install commands
+DANGEROUS_INSTALL_PATTERNS = re.compile(
+    r"(&&|;|\||`|\$\(|>\s|<\s|rm\s|curl\s.*\|\s*sh|wget\s.*\|\s*sh)",
+    re.IGNORECASE,
+)
+
+# Valid MCP name pattern
+MCP_NAME_PATTERN = re.compile(r"^[a-zA-Z][a-zA-Z0-9_-]{0,49}$")
+
+# Maximum query/config sizes
+MAX_MCP_NAME_LENGTH = 50
 
 
 class MCPManager:
@@ -65,6 +81,26 @@ class MCPManager:
             })
         return results
 
+    @staticmethod
+    def validate_mcp_name(name: str) -> str:
+        """Validate an MCP name. Returns error string or empty if valid."""
+        if not name or not name.strip():
+            return "MCP name cannot be empty"
+        if len(name) > MAX_MCP_NAME_LENGTH:
+            return f"MCP name too long ({len(name)} chars, max {MAX_MCP_NAME_LENGTH})"
+        if not MCP_NAME_PATTERN.match(name):
+            return f"Invalid MCP name: {name}"
+        return ""
+
+    @staticmethod
+    def _validate_install_cmd(cmd: str) -> str:
+        """Validate an install command for dangerous patterns. Returns error or empty."""
+        if not cmd:
+            return ""
+        if DANGEROUS_INSTALL_PATTERNS.search(cmd):
+            return f"Install command contains dangerous shell patterns: {cmd[:100]}"
+        return ""
+
     def enable(self, name: str, config: dict[str, Any] | None = None) -> str:
         """Enable an MCP server."""
         entry = MCP_REGISTRY.get(name)
@@ -73,12 +109,19 @@ class MCPManager:
 
         # Install if needed (with retries)
         if not entry.builtin and entry.install_cmd:
+            # Validate install command
+            cmd_err = self._validate_install_cmd(entry.install_cmd)
+            if cmd_err:
+                log.error("Refusing to install MCP '%s': %s", name, cmd_err)
+                return f"Install refused: {cmd_err}"
+
             log.info("Installing MCP: %s", name)
             last_error = ""
             for attempt in range(MCP_INSTALL_MAX_RETRIES):
                 try:
                     result = subprocess.run(
-                        entry.install_cmd, shell=True, capture_output=True, text=True, timeout=120,
+                        entry.install_cmd, shell=True, capture_output=True, text=True,
+                        timeout=MCP_INSTALL_TIMEOUT,
                     )
                     if result.returncode == 0:
                         break
@@ -150,10 +193,12 @@ class MCPManager:
                 })
             else:
                 # External MCP — expose a generic tool using the MCP name
+                # Sanitize tool name to ensure valid Python identifier
+                safe_name = re.sub(r'[^a-zA-Z0-9_]', '_', name)
                 tools.append({
                     "type": "function",
                     "function": {
-                        "name": f"mcp_{name.replace('-', '_')}",
+                        "name": f"mcp_{safe_name}",
                         "description": entry.description,
                         "parameters": {
                             "type": "object",
@@ -201,9 +246,14 @@ class MCPManager:
             return True  # No package means it's a built-in or not applicable
         # Try to check if the package is installed
         try:
+            # Sanitize package name to prevent injection
+            pkg_name = entry.package.replace('-', '_')
+            if not re.match(r'^[a-zA-Z_][a-zA-Z0-9_.]*$', pkg_name):
+                log.warning("Invalid package name for health check: %s", pkg_name)
+                return False
             result = subprocess.run(
-                ["python3", "-c", f"import importlib; importlib.import_module('{entry.package.replace('-', '_')}')"],
-                capture_output=True, text=True, timeout=5,
+                [sys.executable, "-c", f"import importlib; importlib.import_module('{pkg_name}')"],
+                capture_output=True, text=True, timeout=MCP_HEALTH_CHECK_TIMEOUT,
             )
             return result.returncode == 0
         except (subprocess.TimeoutExpired, OSError):

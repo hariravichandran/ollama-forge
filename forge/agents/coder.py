@@ -2,8 +2,19 @@
 
 from __future__ import annotations
 
+from pathlib import Path
+
 from forge.agents.base import BaseAgent, AgentConfig
 from forge.llm.client import OllamaClient
+from forge.tools import BUILTIN_TOOLS
+from forge.utils.logging import get_logger
+
+log = get_logger("agents.coder")
+
+# Temperature bounds for code generation
+CODER_TEMPERATURE = 0.3
+MIN_TEMPERATURE = 0.0
+MAX_TEMPERATURE = 2.0
 
 CODER_SYSTEM_PROMPT = """\
 You are an expert coding assistant running locally via Ollama. Your capabilities:
@@ -28,13 +39,36 @@ Guidelines:
 """
 
 
-def create_coder_agent(client: OllamaClient, working_dir: str = ".") -> BaseAgent:
-    """Create a coder agent with optimal settings for code tasks."""
+def create_coder_agent(
+    client: OllamaClient,
+    working_dir: str = ".",
+    temperature: float = CODER_TEMPERATURE,
+) -> BaseAgent:
+    """Create a coder agent with optimal settings for code tasks.
+
+    Validates tool availability and working directory.
+    """
+    # Validate working directory
+    wd = Path(working_dir)
+    if not wd.exists():
+        log.warning("Working directory does not exist: %s, using '.'", working_dir)
+        working_dir = "."
+
+    # Validate and clamp temperature
+    temperature = max(MIN_TEMPERATURE, min(temperature, MAX_TEMPERATURE))
+
+    # Validate tool availability
+    requested_tools = ["filesystem", "shell", "git", "codebase"]
+    available_tools = [t for t in requested_tools if t in BUILTIN_TOOLS]
+    if len(available_tools) < len(requested_tools):
+        missing = set(requested_tools) - set(available_tools)
+        log.warning("Coder agent: missing tools %s, using available: %s", missing, available_tools)
+
     config = AgentConfig(
         name="coder",
         system_prompt=CODER_SYSTEM_PROMPT,
-        tools=["filesystem", "shell", "git", "codebase"],
-        temperature=0.3,
+        tools=available_tools,
+        temperature=temperature,
         description="Coding assistant — writes, debugs, and refactors code",
     )
     return BaseAgent(client=client, config=config, working_dir=working_dir)
