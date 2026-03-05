@@ -24,6 +24,15 @@ FUZZY_MATCH_THRESHOLD = 0.75
 # Maximum file size for reading (10 MB)
 MAX_READ_SIZE = 10 * 1024 * 1024
 
+# Maximum file size for writing (10 MB)
+MAX_WRITE_SIZE = 10 * 1024 * 1024
+
+# Maximum search results
+MAX_SEARCH_RESULTS = 100
+
+# Regex compile timeout safety — reject patterns over this length
+MAX_REGEX_PATTERN_LENGTH = 500
+
 # Binary file extensions — refuse to read as text
 BINARY_EXTENSIONS = {
     ".pyc", ".pyo", ".so", ".dll", ".dylib", ".o", ".a",
@@ -161,6 +170,14 @@ class FilesystemTool:
             link_target = target.resolve()
             if not str(link_target).startswith(str(self.working_dir)):
                 raise ValueError(f"Symlink target escapes working directory: {path}")
+        # Hard link safety: detect files with multiple hard links
+        # (a hard link could point outside the working directory)
+        if resolved.exists() and resolved.is_file():
+            try:
+                if resolved.stat().st_nlink > 1:
+                    log.debug("File has %d hard links: %s", resolved.stat().st_nlink, path)
+            except OSError:
+                pass
         return resolved
 
     @staticmethod
@@ -212,6 +229,12 @@ class FilesystemTool:
         return "\n".join(numbered)
 
     def _write_file(self, path: str, content: str) -> str:
+        # Validate content size
+        content_bytes = len(content.encode("utf-8", errors="replace"))
+        if content_bytes > MAX_WRITE_SIZE:
+            size_mb = content_bytes / (1024 * 1024)
+            return f"Content too large to write: {size_mb:.1f} MB (max {MAX_WRITE_SIZE // (1024*1024)} MB)"
+
         resolved = self._resolve_path(path)
         resolved.parent.mkdir(parents=True, exist_ok=True)
         resolved.write_text(content)
@@ -294,7 +317,16 @@ class FilesystemTool:
         return "\n".join(lines) + suffix if lines else "No files found"
 
     def _search_files(self, pattern: str, glob: str = "**/*", max_results: int = 20) -> str:
-        regex = re.compile(pattern, re.IGNORECASE)
+        # Validate regex pattern length to prevent ReDoS
+        if len(pattern) > MAX_REGEX_PATTERN_LENGTH:
+            return f"Search pattern too long ({len(pattern)} chars, max {MAX_REGEX_PATTERN_LENGTH})"
+        try:
+            regex = re.compile(pattern, re.IGNORECASE)
+        except re.error as e:
+            return f"Invalid regex pattern: {e}"
+
+        # Clamp max_results
+        max_results = min(max_results, MAX_SEARCH_RESULTS)
         results: list[str] = []
 
         for file_path in self.working_dir.glob(glob):

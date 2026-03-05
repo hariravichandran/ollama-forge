@@ -13,16 +13,28 @@ from __future__ import annotations
 
 import base64
 import json
+import re
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Generator
+from urllib.parse import urlparse
 
 import requests
 
 from forge.utils.logging import get_logger
 
 log = get_logger("llm.client")
+
+# Context window bounds
+MIN_NUM_CTX = 128
+MAX_NUM_CTX = 131072  # 128K
+
+# Model name validation pattern: alphanumeric, dots, colons, hyphens, underscores, slashes
+MODEL_NAME_PATTERN = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9._:/-]{0,99}$")
+
+# Maximum response JSON size to parse (50 MB)
+MAX_RESPONSE_SIZE = 50 * 1024 * 1024
 
 
 @dataclass
@@ -58,10 +70,15 @@ class OllamaClient:
         keep_alive: str = "30m",
         max_retries: int = 2,
     ):
-        self.model = model
-        self.base_url = base_url.rstrip("/")
+        # Validate base URL
+        self.base_url = self._validate_base_url(base_url)
+        # Validate model name
+        self.model = model  # validated on use, not init (may be placeholder)
         self.temperature = temperature
-        self.num_ctx = num_ctx
+        # Clamp context window to reasonable bounds
+        self.num_ctx = max(MIN_NUM_CTX, min(num_ctx, MAX_NUM_CTX))
+        if num_ctx != self.num_ctx:
+            log.warning("num_ctx clamped from %d to %d", num_ctx, self.num_ctx)
         self.num_thread = num_thread
         self.num_batch = num_batch
         self.keep_alive = keep_alive  # Keep model in memory between requests
@@ -76,6 +93,43 @@ class OllamaClient:
         # Session lifecycle tracking — recreate session if too old
         self._session_created: float = time.time()
         self._session_max_age: float = 1800  # 30 minutes
+
+    @staticmethod
+    def _validate_base_url(url: str) -> str:
+        """Validate and normalize the base URL."""
+        url = url.rstrip("/")
+        parsed = urlparse(url)
+        if parsed.scheme not in ("http", "https"):
+            log.warning("Invalid URL scheme '%s', defaulting to http://localhost:11434", parsed.scheme)
+            return "http://localhost:11434"
+        if not parsed.hostname:
+            log.warning("No hostname in URL '%s', defaulting to http://localhost:11434", url)
+            return "http://localhost:11434"
+        return url
+
+    @staticmethod
+    def validate_model_name(name: str) -> str:
+        """Validate a model name. Returns error string or empty if valid."""
+        if not name or not name.strip():
+            return "Model name cannot be empty"
+        if len(name) > 100:
+            return f"Model name too long ({len(name)} chars, max 100)"
+        if not MODEL_NAME_PATTERN.match(name):
+            return f"Invalid model name format: {name}"
+        if ".." in name:
+            return "Model name cannot contain '..'"
+        return ""
+
+    def _safe_json(self, response: requests.Response) -> dict[str, Any]:
+        """Safely parse JSON response, handling malformed data."""
+        try:
+            if len(response.content) > MAX_RESPONSE_SIZE:
+                log.warning("Response too large to parse (%d bytes)", len(response.content))
+                return {"error": "Response too large"}
+            return response.json()
+        except (json.JSONDecodeError, ValueError) as e:
+            log.error("Malformed JSON response: %s", str(e)[:200])
+            return {"error": f"Malformed JSON: {e}"}
 
     @staticmethod
     def _backoff_delay(attempt: int, base: float = 1.0, max_delay: float = 10.0) -> float:
@@ -146,6 +200,12 @@ class OllamaClient:
         Returns:
             True if pull succeeded.
         """
+        # Validate model name
+        validation_err = self.validate_model_name(model)
+        if validation_err:
+            log.error("Invalid model name for pull: %s", validation_err)
+            return False
+
         log.info("Pulling model: %s", model)
         try:
             r = self._get_session().post(
@@ -260,7 +320,10 @@ class OllamaClient:
                         continue
                     return {"response": "", "tokens": 0, "time_s": elapsed, "tokens_per_sec": 0, "error": r.text}
 
-                data = r.json()
+                data = self._safe_json(r)
+                if "error" in data and "response" not in data:
+                    self.stats.errors += 1
+                    return {"response": "", "tokens": 0, "time_s": elapsed, "tokens_per_sec": 0, "error": data["error"]}
                 tokens = data.get("eval_count", 0)
                 prompt_tokens = data.get("prompt_eval_count", 0)
                 self.stats.total_calls += 1
@@ -368,7 +431,10 @@ class OllamaClient:
                         continue
                     return {"response": "", "tokens": 0, "time_s": elapsed, "error": r.text}
 
-                data = r.json()
+                data = self._safe_json(r)
+                if "error" in data and "message" not in data:
+                    self.stats.errors += 1
+                    return {"response": "", "tokens": 0, "time_s": elapsed, "error": data["error"]}
                 msg = data.get("message", {})
                 tokens = data.get("eval_count", 0)
                 prompt_tokens = data.get("prompt_eval_count", 0)
@@ -457,7 +523,11 @@ class OllamaClient:
                 )
                 for line in r.iter_lines():
                     if line:
-                        data = json.loads(line)
+                        try:
+                            data = json.loads(line)
+                        except (json.JSONDecodeError, ValueError):
+                            log.debug("Skipping malformed stream line: %s", line[:100])
+                            continue
                         msg = data.get("message", {})
 
                         # Text content
@@ -597,6 +667,11 @@ class OllamaClient:
 
     def switch_model(self, model: str) -> bool:
         """Switch to a different model, pulling it if necessary."""
+        validation_err = self.validate_model_name(model)
+        if validation_err:
+            log.error("Invalid model name: %s", validation_err)
+            return False
+
         available = [m.get("name", "") for m in self.list_models()]
         # Normalize names (strip :latest)
         available_base = [n.split(":")[0] for n in available]

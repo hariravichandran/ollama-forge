@@ -16,6 +16,13 @@ from forge.utils.logging import get_logger
 
 log = get_logger("agents.base")
 
+# Safety limits
+MAX_USER_MESSAGE_LENGTH = 50_000  # 50K chars per message
+MAX_CONVERSATION_MESSAGES = 1000  # Max messages before forced compression
+MAX_TOOL_RESULT_LENGTH = 50_000  # Truncate oversized tool results
+MAX_ERROR_MESSAGE_LENGTH = 500  # Truncate error messages
+CIRCUIT_BREAKER_RESET_TIME = 300  # Auto-reset circuit breaker after 5 minutes
+
 
 @dataclass
 class AgentConfig:
@@ -88,6 +95,7 @@ class BaseAgent:
 
         # Circuit breaker: track consecutive failures per tool function
         self._tool_failure_counts: dict[str, int] = {}
+        self._tool_failure_times: dict[str, float] = {}  # last failure time per tool
         self._tool_circuit_threshold = 3  # open circuit after N consecutive failures
 
     def get_tool_definitions(self) -> list[dict[str, Any]]:
@@ -105,7 +113,17 @@ class BaseAgent:
         Handles tool calls automatically — loops until the agent produces
         a final text response (no more tool calls).
         """
+        # Validate and truncate oversized messages
+        if len(user_message) > MAX_USER_MESSAGE_LENGTH:
+            log.warning("User message truncated from %d to %d chars", len(user_message), MAX_USER_MESSAGE_LENGTH)
+            user_message = user_message[:MAX_USER_MESSAGE_LENGTH] + "\n... (truncated)"
+
         self.messages.append({"role": "user", "content": user_message})
+
+        # Enforce conversation history limit
+        if len(self.messages) > MAX_CONVERSATION_MESSAGES:
+            log.warning("Conversation exceeded %d messages, trimming oldest", MAX_CONVERSATION_MESSAGES)
+            self.messages = self.messages[-MAX_CONVERSATION_MESSAGES:]
 
         # Compress context if needed
         compressed = self.compressor.compress(self.messages)
@@ -125,7 +143,8 @@ class BaseAgent:
             )
 
             if "error" in result:
-                error_msg = f"LLM error: {result['error']}"
+                error_text = str(result['error'])[:MAX_ERROR_MESSAGE_LENGTH]
+                error_msg = f"LLM error: {error_text}"
                 log.error(error_msg)
                 self.messages.append({"role": "assistant", "content": error_msg})
                 return error_msg
@@ -218,14 +237,22 @@ class BaseAgent:
         # Circuit breaker: skip tools that have failed too many times in a row
         failure_count = self._tool_failure_counts.get(function_name, 0)
         if failure_count >= self._tool_circuit_threshold:
-            log.warning(
-                "Circuit breaker open for '%s' (%d consecutive failures), skipping",
-                function_name, failure_count,
-            )
-            return (
-                f"Tool '{function_name}' is temporarily unavailable after "
-                f"{failure_count} consecutive failures. Try a different approach."
-            )
+            # Auto-reset if enough time has passed since last failure
+            last_fail = self._tool_failure_times.get(function_name, 0)
+            if time.time() - last_fail > CIRCUIT_BREAKER_RESET_TIME:
+                log.info("Circuit breaker auto-reset for '%s' (%.0fs elapsed)", function_name,
+                         time.time() - last_fail)
+                self._tool_failure_counts[function_name] = 0
+                failure_count = 0
+            else:
+                log.warning(
+                    "Circuit breaker open for '%s' (%d consecutive failures), skipping",
+                    function_name, failure_count,
+                )
+                return (
+                    f"Tool '{function_name}' is temporarily unavailable after "
+                    f"{failure_count} consecutive failures. Try a different approach."
+                )
 
         # Check permission before executing
         if not self.permissions.check(function_name, context=args):
@@ -239,11 +266,17 @@ class BaseAgent:
                 result = tool.execute(function_name, args)
                 # Success — reset failure counter
                 self._tool_failure_counts[function_name] = 0
+                # Truncate oversized results to prevent context overflow
+                if len(result) > MAX_TOOL_RESULT_LENGTH:
+                    log.debug("Truncating tool result from %d to %d chars", len(result), MAX_TOOL_RESULT_LENGTH)
+                    result = result[:MAX_TOOL_RESULT_LENGTH] + "\n... (output truncated)"
                 return result
             except Exception as e:
                 log.error("Tool execution error for %s: %s", function_name, e)
                 self._tool_failure_counts[function_name] = failure_count + 1
-                return f"Tool error in '{function_name}': {e}"
+                self._tool_failure_times[function_name] = time.time()
+                error_str = str(e)[:MAX_ERROR_MESSAGE_LENGTH]
+                return f"Tool error in '{function_name}': {error_str}"
 
         return f"Unknown tool function: {function_name}"
 

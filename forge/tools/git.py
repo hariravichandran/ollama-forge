@@ -7,7 +7,9 @@ can undo agent commits with a single command.
 
 from __future__ import annotations
 
+import re
 import subprocess
+import time
 from pathlib import Path
 from typing import Any, TYPE_CHECKING
 
@@ -20,6 +22,19 @@ log = get_logger("tools.git")
 
 # Tag prefix for agent-generated commits (used by undo)
 AGENT_COMMIT_TAG = "[forge]"
+
+# Safety limits
+MAX_DIFF_SIZE = 500_000  # 500K chars max for diff output
+MAX_LOG_COUNT = 500  # Max commits to show in log
+MIN_LOG_COUNT = 1
+
+# Branch name validation: alphanumeric, hyphens, underscores, dots, slashes
+BRANCH_NAME_PATTERN = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9._/-]{0,99}$")
+
+# Operation-specific timeouts (seconds)
+TIMEOUT_FAST = 10    # status, branch
+TIMEOUT_NORMAL = 30  # diff, log, commit
+TIMEOUT_SLOW = 120   # pull, push, revert
 
 
 class GitTool:
@@ -152,8 +167,9 @@ class GitTool:
             return f"Error: {e}"
 
     def _run_git(self, *args: str, timeout: int = 30) -> str:
-        """Run a git command and return output."""
+        """Run a git command and return output, with timing."""
         cmd = ["git"] + list(args)
+        start = time.time()
         result = subprocess.run(
             cmd,
             capture_output=True,
@@ -161,6 +177,9 @@ class GitTool:
             timeout=timeout,
             cwd=self.working_dir,
         )
+        elapsed = time.time() - start
+        if elapsed > 5:
+            log.info("Slow git command (%.1fs): %s", elapsed, " ".join(args[:3]))
         output = result.stdout
         if result.stderr and result.returncode != 0:
             output += f"\n[stderr]: {result.stderr}"
@@ -175,9 +194,15 @@ class GitTool:
             args.append("--cached")
         if file:
             args.extend(["--", file])
-        return self._run_git(*args)
+        output = self._run_git(*args)
+        # Truncate oversized diffs
+        if len(output) > MAX_DIFF_SIZE:
+            log.warning("Diff output truncated from %d to %d chars", len(output), MAX_DIFF_SIZE)
+            output = output[:MAX_DIFF_SIZE] + "\n... (diff truncated, use file-specific diff for full output)"
+        return output
 
     def _log(self, count: int = 10) -> str:
+        count = max(MIN_LOG_COUNT, min(count, MAX_LOG_COUNT))
         return self._run_git("log", "--oneline", f"-{count}")
 
     def _commit(self, message: str, files: list[str] | None = None) -> str:
@@ -236,9 +261,14 @@ class GitTool:
         import re
         conflict_re = re.compile(r"^(<{7}|={7}|>{7})", re.MULTILINE)
         marker_files = []
+        # Binary extensions to skip (avoid false positives from binary content)
+        binary_exts = {".pyc", ".so", ".o", ".exe", ".bin", ".png", ".jpg", ".gif",
+                       ".zip", ".tar", ".gz", ".pdf", ".db", ".sqlite"}
         for f in files:
             file_path = Path(self.working_dir) / f
             if not file_path.exists() or not file_path.is_file():
+                continue
+            if file_path.suffix.lower() in binary_exts:
                 continue
             try:
                 content = file_path.read_text(errors="replace")
@@ -263,11 +293,31 @@ class GitTool:
 
         return "No agent commits found to undo"
 
+    @staticmethod
+    def validate_branch_name(name: str) -> str:
+        """Validate a branch name. Returns error string or empty if valid."""
+        if not name or not name.strip():
+            return "Branch name cannot be empty"
+        if name.startswith("-"):
+            return "Branch name cannot start with '-'"
+        if ".." in name:
+            return "Branch name cannot contain '..'"
+        if name.endswith(".lock"):
+            return "Branch name cannot end with '.lock'"
+        if not BRANCH_NAME_PATTERN.match(name):
+            return f"Invalid branch name: {name}"
+        return ""
+
     def _create_branch(self, name: str) -> str:
         """Create and switch to a new branch.
 
-        Checks if the branch already exists before creating.
+        Validates branch name and checks if it already exists.
         """
+        # Validate branch name
+        validation_err = self.validate_branch_name(name)
+        if validation_err:
+            return f"Error: {validation_err}"
+
         # Check if branch already exists
         existing = self._run_git("branch", "--list", name)
         if existing and existing != "(no output)":
