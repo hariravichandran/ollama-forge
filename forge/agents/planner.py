@@ -35,6 +35,16 @@ if TYPE_CHECKING:
 
 log = get_logger("agents.planner")
 
+# Project scanning limits
+MAX_PROJECT_FILES_DISPLAY = 50  # max files to show in project tree for LLM
+MAX_ERROR_SNIPPET_LENGTH = 60  # truncation for error message snippets
+LLM_PLAN_TEMPERATURE = 0.3
+LLM_PLAN_TIMEOUT = 60
+
+# File discovery
+CODE_EXTENSIONS = {".py", ".js", ".ts", ".jsx", ".tsx", ".go", ".rs", ".java"}
+IGNORE_DIRS = {"__pycache__", "node_modules", ".venv", ".git", ".forge"}
+
 
 @dataclass
 class FileEdit:
@@ -112,9 +122,12 @@ class EditPlanner:
         Returns:
             An EditPlan with ordered file edits.
         """
+        if not task or not task.strip():
+            return EditPlan(task="", reasoning="Empty task description provided.")
+
         # Discover project structure
         project_files = self._get_project_files()
-        project_tree = "\n".join(f"  {f}" for f in project_files[:50])
+        project_tree = "\n".join(f"  {f}" for f in project_files[:MAX_PROJECT_FILES_DISPLAY])
 
         # Analyze dependencies
         deps = self._analyze_dependencies(project_files)
@@ -177,7 +190,7 @@ class EditPlanner:
                     continue
 
                 if old not in content:
-                    snippet = old[:60].replace("\n", "\\n")
+                    snippet = old[:MAX_ERROR_SNIPPET_LENGTH].replace("\n", "\\n")
                     errors.append(f"{file_edit.path} edit {i + 1}: old_string not found: '{snippet}...'")
 
                 if old in seen_old_strings:
@@ -272,8 +285,8 @@ class EditPlanner:
 
     def _get_project_files(self) -> list[str]:
         """Get a list of project files (Python, JS, etc.)."""
-        extensions = {".py", ".js", ".ts", ".jsx", ".tsx", ".go", ".rs", ".java"}
-        ignore_dirs = {"__pycache__", "node_modules", ".venv", ".git", ".forge"}
+        extensions = CODE_EXTENSIONS
+        ignore_dirs = IGNORE_DIRS
         files = []
 
         for root, dirs, filenames in _walk_compat(self.working_dir):
@@ -363,8 +376,8 @@ class EditPlanner:
                 "(dependencies first, dependents last)."
             ),
             json_mode=True,
-            temperature=0.3,
-            timeout=60,
+            temperature=LLM_PLAN_TEMPERATURE,
+            timeout=LLM_PLAN_TIMEOUT,
         )
 
         try:

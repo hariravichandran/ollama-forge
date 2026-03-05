@@ -14,6 +14,16 @@ from forge.utils.env import load_env
 CONFIG_DIR = Path(os.environ.get("FORGE_CONFIG_DIR", "~/.config/ollama-forge")).expanduser()
 CONFIG_FILE = CONFIG_DIR / "config.yaml"
 
+# Validation bounds
+MIN_CONTEXT_TOKENS = 256
+MAX_CONTEXT_TOKENS = 1_000_000
+MIN_PORT = 1
+MAX_PORT = 65535
+
+# Known enum values
+VALID_COMPRESSION_STRATEGIES = {"sliding_summary", "truncate", "progressive"}
+VALID_LOG_LEVELS = {"DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"}
+
 
 @dataclass
 class ForgeConfig:
@@ -62,22 +72,20 @@ def validate_config(config: ForgeConfig) -> list[str]:
         errors.append(f"ollama_base_url must start with http:// or https://, got: {config.ollama_base_url}")
 
     # Integer range checks
-    if config.max_context_tokens < 256:
-        errors.append(f"max_context_tokens must be >= 256, got: {config.max_context_tokens}")
-    if config.max_context_tokens > 1_000_000:
+    if config.max_context_tokens < MIN_CONTEXT_TOKENS:
+        errors.append(f"max_context_tokens must be >= {MIN_CONTEXT_TOKENS}, got: {config.max_context_tokens}")
+    if config.max_context_tokens > MAX_CONTEXT_TOKENS:
         errors.append(f"max_context_tokens seems too large: {config.max_context_tokens}")
 
-    if not (1 <= config.web_port <= 65535):
-        errors.append(f"web_port must be 1-65535, got: {config.web_port}")
+    if not (MIN_PORT <= config.web_port <= MAX_PORT):
+        errors.append(f"web_port must be {MIN_PORT}-{MAX_PORT}, got: {config.web_port}")
 
     # Known enum values
-    valid_strategies = {"sliding_summary", "truncate", "progressive"}
-    if config.compression_strategy not in valid_strategies:
-        errors.append(f"compression_strategy must be one of {valid_strategies}, got: {config.compression_strategy}")
+    if config.compression_strategy not in VALID_COMPRESSION_STRATEGIES:
+        errors.append(f"compression_strategy must be one of {VALID_COMPRESSION_STRATEGIES}, got: {config.compression_strategy}")
 
-    valid_log_levels = {"DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"}
-    if config.log_level.upper() not in valid_log_levels:
-        errors.append(f"log_level must be one of {valid_log_levels}, got: {config.log_level}")
+    if config.log_level.upper() not in VALID_LOG_LEVELS:
+        errors.append(f"log_level must be one of {VALID_LOG_LEVELS}, got: {config.log_level}")
 
     return errors
 

@@ -40,6 +40,25 @@ MAX_SESSION_SIZE_MB = 10  # Maximum session file size
 MAX_MESSAGES_PER_SESSION = 10_000  # Max messages in a single session
 MAX_SESSIONS_ON_DISK = 1000  # Cleanup oldest sessions beyond this
 
+# Time thresholds for age display
+SECONDS_PER_MINUTE = 60
+SECONDS_PER_HOUR = 3600
+SECONDS_PER_DAY = 86400
+
+# Display limits
+MAX_TITLE_LENGTH = 50  # title auto-generation truncation
+MAX_SYSTEM_CONTENT_DISPLAY = 100  # system message preview
+MAX_SEARCH_RESULT_CONTENT = 200  # search result truncation
+DEFAULT_LIST_LIMIT = 20  # default sessions to show
+MIN_LIST_LIMIT = 1
+MAX_LIST_LIMIT = 500
+DEFAULT_SEARCH_LIMIT = 10
+MAX_SEARCH_LIMIT = 100
+
+# Validation
+VALID_EXPORT_FORMATS = {"markdown", "json", "html"}
+TRUNCATION_DIVISOR = 2  # keep last half of messages when oversized
+
 
 @dataclass
 class Session:
@@ -65,12 +84,12 @@ class Session:
     def summary(self) -> str:
         """One-line summary for listing."""
         age = time.time() - self.updated_at
-        if age < 3600:
-            age_str = f"{int(age / 60)}m ago"
-        elif age < 86400:
-            age_str = f"{int(age / 3600)}h ago"
+        if age < SECONDS_PER_HOUR:
+            age_str = f"{int(age / SECONDS_PER_MINUTE)}m ago"
+        elif age < SECONDS_PER_DAY:
+            age_str = f"{int(age / SECONDS_PER_HOUR)}h ago"
         else:
-            age_str = f"{int(age / 86400)}d ago"
+            age_str = f"{int(age / SECONDS_PER_DAY)}d ago"
         return f"{self.session_id[:8]} | {self.title} | {self.agent_name} | {self.message_count} msgs | {age_str}"
 
 
@@ -161,7 +180,7 @@ class SessionManager:
         if size_mb > MAX_SESSION_SIZE_MB:
             log.warning("Session %s too large (%.1f MB), truncating messages", session_id, size_mb)
             # Keep only the last half of messages
-            half = len(session.messages) // 2
+            half = len(session.messages) // TRUNCATION_DIVISOR
             session.messages = session.messages[half:]
             content = json.dumps(asdict(session), indent=2)
 
@@ -209,8 +228,9 @@ class SessionManager:
             log.error("Failed to load session %s: %s", session_id, e)
             return None
 
-    def list_sessions(self, limit: int = 20) -> list[SessionSummary]:
+    def list_sessions(self, limit: int = DEFAULT_LIST_LIMIT) -> list[SessionSummary]:
         """List saved sessions, most recent first."""
+        limit = min(max(limit, MIN_LIST_LIMIT), MAX_LIST_LIMIT)
         summaries = []
 
         for session_file in self.sessions_dir.glob("session-*.json"):
@@ -258,6 +278,9 @@ class SessionManager:
         Returns:
             Formatted string.
         """
+        if format not in VALID_EXPORT_FORMATS:
+            return f"Invalid format '{format}'. Must be one of: {', '.join(sorted(VALID_EXPORT_FORMATS))}"
+
         session = self.load(session_id)
         if not session:
             return f"Session not found: {session_id}"
@@ -284,7 +307,7 @@ class SessionManager:
             role = msg.get("role", "user")
             content = msg.get("content", "")
             if role == "system":
-                lines.append(f"*System: {content[:100]}...*")
+                lines.append(f"*System: {content[:MAX_SYSTEM_CONTENT_DISPLAY]}...*")
             elif role == "user":
                 lines.append(f"**User:** {content}")
             elif role == "assistant":
@@ -339,7 +362,7 @@ Agent: {html_mod.escape(session.agent_name)} | Model: {html_mod.escape(session.m
 </body>
 </html>"""
 
-    def search(self, query: str, limit: int = 10) -> list[dict]:
+    def search(self, query: str, limit: int = DEFAULT_SEARCH_LIMIT) -> list[dict]:
         """Search across all sessions for messages matching a query.
 
         Args:
@@ -349,6 +372,9 @@ Agent: {html_mod.escape(session.agent_name)} | Model: {html_mod.escape(session.m
         Returns:
             List of dicts with session_id, title, role, content, match_line.
         """
+        if not query or not query.strip():
+            return []
+        limit = min(max(limit, 1), MAX_SEARCH_LIMIT)
         query_lower = query.lower()
         results = []
 
@@ -368,7 +394,7 @@ Agent: {html_mod.escape(session.agent_name)} | Model: {html_mod.escape(session.m
                                     "session_id": session_id,
                                     "title": title,
                                     "role": msg.get("role", ""),
-                                    "content": line.strip()[:200],
+                                    "content": line.strip()[:MAX_SEARCH_RESULT_CONTENT],
                                 })
                                 if len(results) >= limit:
                                     return results
@@ -414,6 +440,6 @@ Agent: {html_mod.escape(session.agent_name)} | Model: {html_mod.escape(session.m
             if msg.get("role") == "user":
                 content = msg.get("content", "").strip()
                 # Take first line, limit to 50 chars
-                first_line = content.split("\n")[0][:50]
+                first_line = content.split("\n")[0][:MAX_TITLE_LENGTH]
                 return first_line if first_line else "Untitled"
         return "Untitled"

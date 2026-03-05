@@ -16,6 +16,15 @@ from forge.utils.logging import get_logger
 
 log = get_logger("agents.tracker")
 
+# Validation limits
+MAX_SYSTEM_NAME_LENGTH = 100
+MAX_DESCRIPTION_LENGTH = 500
+MAX_AGENTS_PER_SYSTEM = 20
+VALID_SYSTEM_TYPES = {"single", "multi"}
+
+# Display
+NAME_COLUMN_WIDTH = 25
+
 
 @dataclass
 class AgentSystemInfo:
@@ -55,6 +64,18 @@ class AgentTracker:
         description: str = "",
     ) -> str:
         """Register a new agent system."""
+        if not name or not name.strip():
+            return "System name cannot be empty"
+        if len(name) > MAX_SYSTEM_NAME_LENGTH:
+            return f"System name too long (max {MAX_SYSTEM_NAME_LENGTH} chars)"
+        if system_type not in VALID_SYSTEM_TYPES:
+            return f"Invalid system_type '{system_type}'. Must be one of: {', '.join(sorted(VALID_SYSTEM_TYPES))}"
+        if not agents:
+            return "At least one agent is required"
+        if len(agents) > MAX_AGENTS_PER_SYSTEM:
+            return f"Too many agents (max {MAX_AGENTS_PER_SYSTEM})"
+        if len(description) > MAX_DESCRIPTION_LENGTH:
+            description = description[:MAX_DESCRIPTION_LENGTH]
         if name in self.systems:
             return f"System '{name}' already exists"
 
@@ -77,6 +98,8 @@ class AgentTracker:
 
     def record_activity(self, system_name: str, messages: int = 0, tool_calls: int = 0) -> None:
         """Record activity for a system."""
+        messages = max(0, messages)
+        tool_calls = max(0, tool_calls)
         system = self.systems.get(system_name)
         if system:
             system.last_active = time.time()
@@ -93,7 +116,7 @@ class AgentTracker:
         for sys in sorted(self.systems.values(), key=lambda s: s.last_active, reverse=True):
             type_icon = "[single]" if sys.system_type == "single" else "[multi] "
             agents_str = ", ".join(sys.agents)
-            lines.append(f"  {type_icon} {sys.name:25s} agents: {agents_str}")
+            lines.append(f"  {type_icon} {sys.name:{NAME_COLUMN_WIDTH}s} agents: {agents_str}")
             if sys.description:
                 lines.append(f"           {sys.description}")
             lines.append(f"           msgs: {sys.total_messages}  tools: {sys.total_tool_calls}")

@@ -36,6 +36,14 @@ from forge.utils.logging import get_logger
 
 log = get_logger("agents.tasks")
 
+# Task limits
+DEFAULT_TASK_TIMEOUT = 600  # seconds
+MIN_TASK_TIMEOUT = 1
+MAX_TASK_TIMEOUT = 7200  # 2 hours
+DEFAULT_MAX_CONCURRENT = 5
+MIN_MAX_CONCURRENT = 1
+MAX_MAX_CONCURRENT = 50
+
 
 class TaskStatus(Enum):
     """Status of a background task."""
@@ -97,9 +105,9 @@ class TaskManager:
         tm.cancel(task_id)
     """
 
-    def __init__(self, working_dir: str = ".", max_concurrent: int = 5):
+    def __init__(self, working_dir: str = ".", max_concurrent: int = DEFAULT_MAX_CONCURRENT):
         self.working_dir = working_dir
-        self.max_concurrent = max_concurrent
+        self.max_concurrent = min(max(max_concurrent, MIN_MAX_CONCURRENT), MAX_MAX_CONCURRENT)
         self._tasks: dict[str, TaskResult] = {}
         self._processes: dict[str, subprocess.Popen] = {}
         self._threads: dict[str, threading.Thread] = {}
@@ -109,13 +117,21 @@ class TaskManager:
         self,
         name: str,
         command: str,
-        timeout: int = 600,
+        timeout: int = DEFAULT_TASK_TIMEOUT,
         callback: Callable[[TaskResult], None] | None = None,
     ) -> str:
         """Submit a shell command as a background task.
 
         Returns the task_id.
         """
+        if not command or not command.strip():
+            task_id = f"task-{uuid.uuid4().hex[:8]}"
+            result = TaskResult(task_id=task_id, name=name, status=TaskStatus.FAILED)
+            result.error = "Empty command"
+            self._tasks[task_id] = result
+            return task_id
+
+        timeout = min(max(timeout, MIN_TASK_TIMEOUT), MAX_TASK_TIMEOUT)
         task_id = f"task-{uuid.uuid4().hex[:8]}"
 
         result = TaskResult(
