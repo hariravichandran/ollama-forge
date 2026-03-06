@@ -36,6 +36,10 @@ MAX_RESPONSE_BYTES = 5 * 1024 * 1024
 # Rate limiting: minimum seconds between requests to the same domain
 RATE_LIMIT_SECONDS = 2.0
 
+# Cache limits
+MAX_CACHE_ENTRIES = 500  # evict oldest when exceeded
+MAX_RATE_LIMIT_DOMAINS = 1000  # max tracked domains for rate limiting
+
 
 class WebTool:
     """Web search and fetch operations."""
@@ -54,6 +58,15 @@ class WebTool:
         self._http_session: Any = None
         # Rate limiting: track last request time per domain
         self._domain_last_request: dict[str, float] = {}
+
+    def close(self) -> None:
+        """Close HTTP session and release resources."""
+        if self._http_session is not None:
+            try:
+                self._http_session.close()
+            except Exception as e:
+                log.debug("Error closing HTTP session: %s", e)
+            self._http_session = None
 
     def get_tool_definitions(self) -> list[dict[str, Any]]:
         """Return Ollama tool-calling definitions."""
@@ -266,6 +279,12 @@ class WebTool:
             log.debug("Rate limiting %s: waiting %.1fs", domain, wait)
             time.sleep(wait)
         self._domain_last_request[domain] = time.time()
+        # Evict stale entries to prevent unbounded growth
+        if len(self._domain_last_request) > MAX_RATE_LIMIT_DOMAINS:
+            cutoff = now - 3600  # Remove entries older than 1 hour
+            self._domain_last_request = {
+                k: v for k, v in self._domain_last_request.items() if v > cutoff
+            }
 
     def _html_to_text(self, html: str) -> str:
         """Basic HTML to text conversion."""
@@ -304,5 +323,9 @@ class WebTool:
         return None
 
     def _set_cached(self, key: str, data: str) -> None:
+        # Evict oldest entries if cache is full
+        if len(self._cache) >= MAX_CACHE_ENTRIES:
+            oldest_key = min(self._cache, key=lambda k: self._cache[k].get("ts", 0))
+            del self._cache[oldest_key]
         self._cache[key] = {"data": data, "ts": time.time()}
         self._save_cache()

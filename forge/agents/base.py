@@ -22,6 +22,8 @@ MAX_CONVERSATION_MESSAGES = 1000  # Max messages before forced compression
 MAX_TOOL_RESULT_LENGTH = 50_000  # Truncate oversized tool results
 MAX_ERROR_MESSAGE_LENGTH = 500  # Truncate error messages
 CIRCUIT_BREAKER_RESET_TIME = 300  # Auto-reset circuit breaker after 5 minutes
+CIRCUIT_BREAKER_CLEANUP_INTERVAL = 50  # Clean stale entries every N tool calls
+MAX_CIRCUIT_BREAKER_ENTRIES = 100  # Max tracked tool functions
 
 
 @dataclass
@@ -97,6 +99,7 @@ class BaseAgent:
         self._tool_failure_counts: dict[str, int] = {}
         self._tool_failure_times: dict[str, float] = {}  # last failure time per tool
         self._tool_circuit_threshold = 3  # open circuit after N consecutive failures
+        self._tool_call_count = 0  # total tool calls for periodic cleanup
 
     def get_tool_definitions(self) -> list[dict[str, Any]]:
         """Get all tool definitions for Ollama tool calling (cached)."""
@@ -234,6 +237,11 @@ class BaseAgent:
         Wraps execution in try/except to prevent tool errors from
         crashing the chat loop.
         """
+        self._tool_call_count += 1
+        # Periodic cleanup of stale circuit breaker entries
+        if self._tool_call_count % CIRCUIT_BREAKER_CLEANUP_INTERVAL == 0:
+            self._cleanup_stale_circuit_breakers()
+
         # Circuit breaker: skip tools that have failed too many times in a row
         failure_count = self._tool_failure_counts.get(function_name, 0)
         if failure_count >= self._tool_circuit_threshold:
@@ -279,6 +287,19 @@ class BaseAgent:
                 return f"Tool error in '{function_name}': {error_str}"
 
         return f"Unknown tool function: {function_name}"
+
+    def _cleanup_stale_circuit_breakers(self) -> None:
+        """Remove stale circuit breaker entries that have expired."""
+        now = time.time()
+        stale_keys = [
+            k for k, t in self._tool_failure_times.items()
+            if now - t > CIRCUIT_BREAKER_RESET_TIME
+        ]
+        for k in stale_keys:
+            self._tool_failure_counts.pop(k, None)
+            self._tool_failure_times.pop(k, None)
+        if stale_keys:
+            log.debug("Cleaned up %d stale circuit breaker entries", len(stale_keys))
 
     def reset_circuit_breaker(self, function_name: str | None = None) -> None:
         """Reset circuit breaker for a specific tool or all tools.

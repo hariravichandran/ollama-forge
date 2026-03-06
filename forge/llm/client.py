@@ -244,7 +244,7 @@ class OllamaClient:
     def delete_model(self, model: str) -> bool:
         """Delete a locally stored model."""
         try:
-            r = requests.delete(
+            r = self._get_session().delete(
                 f"{self.base_url}/api/delete",
                 json={"name": model},
                 timeout=30,
