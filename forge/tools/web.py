@@ -5,6 +5,7 @@ from __future__ import annotations
 import ipaddress
 import json
 import re
+import threading
 import time
 from pathlib import Path
 from typing import Any
@@ -54,6 +55,10 @@ class WebTool:
         self.cache_dir.mkdir(parents=True, exist_ok=True)
         self.cache_file = self.cache_dir / "web_search_cache.json"
         self._cache: dict[str, Any] = self._load_cache()
+        # Thread safety locks
+        self._cache_lock = threading.Lock()
+        self._session_lock = threading.Lock()
+        self._rate_limit_lock = threading.Lock()
         # Persistent HTTP session for connection reuse
         self._http_session: Any = None
         # Rate limiting: track last request time per domain
@@ -61,12 +66,13 @@ class WebTool:
 
     def close(self) -> None:
         """Close HTTP session and release resources."""
-        if self._http_session is not None:
-            try:
-                self._http_session.close()
-            except Exception as e:
-                log.debug("Error closing HTTP session: %s", e)
-            self._http_session = None
+        with self._session_lock:
+            if self._http_session is not None:
+                try:
+                    self._http_session.close()
+                except Exception as e:
+                    log.debug("Error closing HTTP session: %s", e)
+                self._http_session = None
 
     def get_tool_definitions(self) -> list[dict[str, Any]]:
         """Return Ollama tool-calling definitions."""
@@ -184,11 +190,13 @@ class WebTool:
         for attempt in range(MAX_RETRIES):
             try:
                 import requests
-                if self._http_session is None:
-                    self._http_session = requests.Session()
-                    self._http_session.headers["User-Agent"] = "ollama-forge/0.1 (local AI assistant)"
-                    self._http_session.max_redirects = MAX_REDIRECTS
-                r = self._http_session.get(url, timeout=15, stream=True)
+                with self._session_lock:
+                    if self._http_session is None:
+                        self._http_session = requests.Session()
+                        self._http_session.headers["User-Agent"] = "ollama-forge/0.1 (local AI assistant)"
+                        self._http_session.max_redirects = MAX_REDIRECTS
+                    session = self._http_session
+                r = session.get(url, timeout=15, stream=True)
 
                 # Retry on transient HTTP errors
                 if r.status_code in RETRYABLE_STATUS_CODES:
@@ -272,19 +280,20 @@ class WebTool:
             domain = urlparse(url).hostname or ""
         except Exception:
             return
-        now = time.time()
-        last = self._domain_last_request.get(domain, 0)
-        wait = RATE_LIMIT_SECONDS - (now - last)
-        if wait > 0:
-            log.debug("Rate limiting %s: waiting %.1fs", domain, wait)
-            time.sleep(wait)
-        self._domain_last_request[domain] = time.time()
-        # Evict stale entries to prevent unbounded growth
-        if len(self._domain_last_request) > MAX_RATE_LIMIT_DOMAINS:
-            cutoff = now - 3600  # Remove entries older than 1 hour
-            self._domain_last_request = {
-                k: v for k, v in self._domain_last_request.items() if v > cutoff
-            }
+        with self._rate_limit_lock:
+            now = time.time()
+            last = self._domain_last_request.get(domain, 0)
+            wait = RATE_LIMIT_SECONDS - (now - last)
+            if wait > 0:
+                log.debug("Rate limiting %s: waiting %.1fs", domain, wait)
+                time.sleep(wait)
+            self._domain_last_request[domain] = time.time()
+            # Evict stale entries to prevent unbounded growth
+            if len(self._domain_last_request) > MAX_RATE_LIMIT_DOMAINS:
+                cutoff = now - 3600  # Remove entries older than 1 hour
+                self._domain_last_request = {
+                    k: v for k, v in self._domain_last_request.items() if v > cutoff
+                }
 
     def _html_to_text(self, html: str) -> str:
         """Basic HTML to text conversion."""
@@ -317,15 +326,17 @@ class WebTool:
             log.debug("Could not save web cache: %s", e)
 
     def _get_cached(self, key: str) -> str | None:
-        entry = self._cache.get(key)
-        if entry and time.time() - entry.get("ts", 0) < self.CACHE_TTL:
-            return entry.get("data")
+        with self._cache_lock:
+            entry = self._cache.get(key)
+            if entry and time.time() - entry.get("ts", 0) < self.CACHE_TTL:
+                return entry.get("data")
         return None
 
     def _set_cached(self, key: str, data: str) -> None:
-        # Evict oldest entries if cache is full
-        if len(self._cache) >= MAX_CACHE_ENTRIES:
-            oldest_key = min(self._cache, key=lambda k: self._cache[k].get("ts", 0))
-            del self._cache[oldest_key]
-        self._cache[key] = {"data": data, "ts": time.time()}
-        self._save_cache()
+        with self._cache_lock:
+            # Evict oldest entries if cache is full
+            if len(self._cache) >= MAX_CACHE_ENTRIES:
+                oldest_key = min(self._cache, key=lambda k: self._cache[k].get("ts", 0))
+                del self._cache[oldest_key]
+            self._cache[key] = {"data": data, "ts": time.time()}
+            self._save_cache()

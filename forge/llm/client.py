@@ -14,6 +14,7 @@ from __future__ import annotations
 import base64
 import json
 import re
+import threading
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -92,6 +93,10 @@ class OllamaClient:
         self.keep_alive = keep_alive  # Keep model in memory between requests
         self.max_retries = max_retries
         self.stats = LLMStats()
+        # Thread safety locks
+        self._stats_lock = threading.Lock()
+        self._cache_lock = threading.Lock()
+        self._session_lock = threading.Lock()
         # Persistent HTTP session for connection pooling
         self._session = requests.Session()
         # Model list cache (TTL-based)
@@ -104,9 +109,10 @@ class OllamaClient:
 
     def close(self) -> None:
         """Close the HTTP session and release resources."""
-        if self._session:
-            self._session.close()
-            log.debug("Closed HTTP session for OllamaClient")
+        with self._session_lock:
+            if self._session:
+                self._session.close()
+                log.debug("Closed HTTP session for OllamaClient")
 
     @staticmethod
     def _validate_base_url(url: str) -> str:
@@ -153,12 +159,13 @@ class OllamaClient:
 
     def _get_session(self) -> requests.Session:
         """Get HTTP session, recreating if stale to prevent connection issues."""
-        if time.time() - self._session_created > self._session_max_age:
-            self._session.close()
-            self._session = requests.Session()
-            self._session_created = time.time()
-            log.debug("Recreated HTTP session (max age exceeded)")
-        return self._session
+        with self._session_lock:
+            if time.time() - self._session_created > self._session_max_age:
+                self._session.close()
+                self._session = requests.Session()
+                self._session_created = time.time()
+                log.debug("Recreated HTTP session (max age exceeded)")
+            return self._session
 
     def is_available(self) -> bool:
         """Check if Ollama server is running."""
@@ -180,18 +187,19 @@ class OllamaClient:
 
     def list_models(self) -> list[dict[str, Any]]:
         """List locally available models (cached with 5-minute TTL)."""
-        now = time.time()
-        if self._models_cache and (now - self._models_cache_time) < self._models_cache_ttl:
-            return self._models_cache
-        try:
-            r = self._get_session().get(f"{self.base_url}/api/tags", timeout=10)
-            if r.status_code == 200:
-                self._models_cache = r.json().get("models", [])
-                self._models_cache_time = now
+        with self._cache_lock:
+            now = time.time()
+            if self._models_cache and (now - self._models_cache_time) < self._models_cache_ttl:
                 return self._models_cache
-        except requests.ConnectionError:
-            log.error("Cannot connect to Ollama at %s", self.base_url)
-        return self._models_cache or []
+            try:
+                r = self._get_session().get(f"{self.base_url}/api/tags", timeout=10)
+                if r.status_code == 200:
+                    self._models_cache = r.json().get("models", [])
+                    self._models_cache_time = now
+                    return self._models_cache
+            except requests.ConnectionError:
+                log.error("Cannot connect to Ollama at %s", self.base_url)
+            return self._models_cache or []
 
     def list_running(self) -> list[dict[str, Any]]:
         """List models currently loaded in memory."""
@@ -325,7 +333,8 @@ class OllamaClient:
                 elapsed = time.time() - start
 
                 if r.status_code != 200:
-                    self.stats.errors += 1
+                    with self._stats_lock:
+                        self.stats.errors += 1
                     last_error = r.text
                     if attempt < self.max_retries:
                         delay = self._backoff_delay(attempt)
@@ -336,14 +345,16 @@ class OllamaClient:
 
                 data = self._safe_json(r)
                 if "error" in data and "response" not in data:
-                    self.stats.errors += 1
+                    with self._stats_lock:
+                        self.stats.errors += 1
                     return {"response": "", "tokens": 0, "time_s": elapsed, "tokens_per_sec": 0, "error": data["error"]}
                 tokens = data.get("eval_count", 0)
                 prompt_tokens = data.get("prompt_eval_count", 0)
-                self.stats.total_calls += 1
-                self.stats.total_tokens += tokens
-                self.stats.total_prompt_tokens += prompt_tokens
-                self.stats.total_time_s += elapsed
+                with self._stats_lock:
+                    self.stats.total_calls += 1
+                    self.stats.total_tokens += tokens
+                    self.stats.total_prompt_tokens += prompt_tokens
+                    self.stats.total_time_s += elapsed
 
                 return {
                     "response": data.get("response", ""),
@@ -353,7 +364,8 @@ class OllamaClient:
                     "tokens_per_sec": tokens / max(0.01, elapsed),
                 }
             except requests.Timeout:
-                self.stats.errors += 1
+                with self._stats_lock:
+                    self.stats.errors += 1
                 last_error = "timeout"
                 if attempt < self.max_retries:
                     delay = self._backoff_delay(attempt)
@@ -362,7 +374,8 @@ class OllamaClient:
                     continue
                 return {"response": "", "tokens": 0, "time_s": time.time() - start, "tokens_per_sec": 0, "error": "timeout"}
             except (requests.ConnectionError, requests.exceptions.RequestException, OSError) as e:
-                self.stats.errors += 1
+                with self._stats_lock:
+                    self.stats.errors += 1
                 last_error = str(e)
                 if attempt < self.max_retries:
                     delay = self._backoff_delay(attempt)
@@ -436,7 +449,8 @@ class OllamaClient:
                 elapsed = time.time() - start
 
                 if r.status_code != 200:
-                    self.stats.errors += 1
+                    with self._stats_lock:
+                        self.stats.errors += 1
                     last_error = r.text
                     if attempt < self.max_retries:
                         delay = self._backoff_delay(attempt)
@@ -447,16 +461,18 @@ class OllamaClient:
 
                 data = self._safe_json(r)
                 if "error" in data and "message" not in data:
-                    self.stats.errors += 1
+                    with self._stats_lock:
+                        self.stats.errors += 1
                     return {"response": "", "tokens": 0, "time_s": elapsed, "error": data["error"]}
                 msg = data.get("message", {})
                 tokens = data.get("eval_count", 0)
                 prompt_tokens = data.get("prompt_eval_count", 0)
 
-                self.stats.total_calls += 1
-                self.stats.total_tokens += tokens
-                self.stats.total_prompt_tokens += prompt_tokens
-                self.stats.total_time_s += elapsed
+                with self._stats_lock:
+                    self.stats.total_calls += 1
+                    self.stats.total_tokens += tokens
+                    self.stats.total_prompt_tokens += prompt_tokens
+                    self.stats.total_time_s += elapsed
 
                 result: dict[str, Any] = {
                     "response": msg.get("content", ""),
@@ -470,7 +486,8 @@ class OllamaClient:
 
                 return result
             except requests.Timeout:
-                self.stats.errors += 1
+                with self._stats_lock:
+                    self.stats.errors += 1
                 last_error = "timeout"
                 if attempt < self.max_retries:
                     delay = self._backoff_delay(attempt)
@@ -479,7 +496,8 @@ class OllamaClient:
                     continue
                 return {"response": "", "tokens": 0, "time_s": time.time() - start, "error": "timeout"}
             except (requests.ConnectionError, requests.exceptions.RequestException, OSError) as e:
-                self.stats.errors += 1
+                with self._stats_lock:
+                    self.stats.errors += 1
                 last_error = str(e)
                 if attempt < self.max_retries:
                     delay = self._backoff_delay(attempt)
@@ -558,10 +576,11 @@ class OllamaClient:
                             total_tokens = data.get("eval_count", 0)
                             prompt_tokens = data.get("prompt_eval_count", 0)
                             elapsed = time.time() - start
-                            self.stats.total_calls += 1
-                            self.stats.total_tokens += total_tokens
-                            self.stats.total_prompt_tokens += prompt_tokens
-                            self.stats.total_time_s += elapsed
+                            with self._stats_lock:
+                                self.stats.total_calls += 1
+                                self.stats.total_tokens += total_tokens
+                                self.stats.total_prompt_tokens += prompt_tokens
+                                self.stats.total_time_s += elapsed
                             yield {
                                 "type": "done",
                                 "tokens": total_tokens,
@@ -570,7 +589,8 @@ class OllamaClient:
                             }
                 return  # Stream completed successfully
             except (requests.ConnectionError, requests.Timeout, OSError) as e:
-                self.stats.errors += 1
+                with self._stats_lock:
+                    self.stats.errors += 1
                 if attempt < self.max_retries:
                     delay = self._backoff_delay(attempt)
                     log.warning("Stream chat error (attempt %d), retrying in %.1fs: %s", attempt + 1, delay, e)

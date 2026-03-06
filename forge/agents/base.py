@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import threading
 import time
 from dataclasses import dataclass, field
 from typing import Any, Generator
@@ -100,6 +101,7 @@ class BaseAgent:
         self._tool_failure_times: dict[str, float] = {}  # last failure time per tool
         self._tool_circuit_threshold = 3  # open circuit after N consecutive failures
         self._tool_call_count = 0  # total tool calls for periodic cleanup
+        self._circuit_breaker_lock = threading.Lock()
 
     def get_tool_definitions(self) -> list[dict[str, Any]]:
         """Get all tool definitions for Ollama tool calling (cached)."""
@@ -237,30 +239,31 @@ class BaseAgent:
         Wraps execution in try/except to prevent tool errors from
         crashing the chat loop.
         """
-        self._tool_call_count += 1
-        # Periodic cleanup of stale circuit breaker entries
-        if self._tool_call_count % CIRCUIT_BREAKER_CLEANUP_INTERVAL == 0:
-            self._cleanup_stale_circuit_breakers()
+        with self._circuit_breaker_lock:
+            self._tool_call_count += 1
+            # Periodic cleanup of stale circuit breaker entries
+            if self._tool_call_count % CIRCUIT_BREAKER_CLEANUP_INTERVAL == 0:
+                self._cleanup_stale_circuit_breakers()
 
-        # Circuit breaker: skip tools that have failed too many times in a row
-        failure_count = self._tool_failure_counts.get(function_name, 0)
-        if failure_count >= self._tool_circuit_threshold:
-            # Auto-reset if enough time has passed since last failure
-            last_fail = self._tool_failure_times.get(function_name, 0)
-            if time.time() - last_fail > CIRCUIT_BREAKER_RESET_TIME:
-                log.info("Circuit breaker auto-reset for '%s' (%.0fs elapsed)", function_name,
-                         time.time() - last_fail)
-                self._tool_failure_counts[function_name] = 0
-                failure_count = 0
-            else:
-                log.warning(
-                    "Circuit breaker open for '%s' (%d consecutive failures), skipping",
-                    function_name, failure_count,
-                )
-                return (
-                    f"Tool '{function_name}' is temporarily unavailable after "
-                    f"{failure_count} consecutive failures. Try a different approach."
-                )
+            # Circuit breaker: skip tools that have failed too many times in a row
+            failure_count = self._tool_failure_counts.get(function_name, 0)
+            if failure_count >= self._tool_circuit_threshold:
+                # Auto-reset if enough time has passed since last failure
+                last_fail = self._tool_failure_times.get(function_name, 0)
+                if time.time() - last_fail > CIRCUIT_BREAKER_RESET_TIME:
+                    log.info("Circuit breaker auto-reset for '%s' (%.0fs elapsed)", function_name,
+                             time.time() - last_fail)
+                    self._tool_failure_counts[function_name] = 0
+                    failure_count = 0
+                else:
+                    log.warning(
+                        "Circuit breaker open for '%s' (%d consecutive failures), skipping",
+                        function_name, failure_count,
+                    )
+                    return (
+                        f"Tool '{function_name}' is temporarily unavailable after "
+                        f"{failure_count} consecutive failures. Try a different approach."
+                    )
 
         # Check permission before executing
         if not self.permissions.check(function_name, context=args):
@@ -273,7 +276,8 @@ class BaseAgent:
             try:
                 result = tool.execute(function_name, args)
                 # Success — reset failure counter
-                self._tool_failure_counts[function_name] = 0
+                with self._circuit_breaker_lock:
+                    self._tool_failure_counts[function_name] = 0
                 # Truncate oversized results to prevent context overflow
                 if len(result) > MAX_TOOL_RESULT_LENGTH:
                     log.debug("Truncating tool result from %d to %d chars", len(result), MAX_TOOL_RESULT_LENGTH)
@@ -281,8 +285,9 @@ class BaseAgent:
                 return result
             except Exception as e:
                 log.error("Tool execution error for %s: %s", function_name, e)
-                self._tool_failure_counts[function_name] = failure_count + 1
-                self._tool_failure_times[function_name] = time.time()
+                with self._circuit_breaker_lock:
+                    self._tool_failure_counts[function_name] = failure_count + 1
+                    self._tool_failure_times[function_name] = time.time()
                 error_str = str(e)[:MAX_ERROR_MESSAGE_LENGTH]
                 return f"Tool error in '{function_name}': {error_str}"
 
@@ -307,10 +312,11 @@ class BaseAgent:
         Call this when the underlying issue has been resolved
         (e.g., a service restarted, a file restored).
         """
-        if function_name:
-            self._tool_failure_counts.pop(function_name, None)
-        else:
-            self._tool_failure_counts.clear()
+        with self._circuit_breaker_lock:
+            if function_name:
+                self._tool_failure_counts.pop(function_name, None)
+            else:
+                self._tool_failure_counts.clear()
 
     def reset(self) -> None:
         """Clear conversation history and context cache."""

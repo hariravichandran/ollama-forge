@@ -134,7 +134,8 @@ class TaskManager:
             task_id = f"task-{uuid.uuid4().hex[:8]}"
             result = TaskResult(task_id=task_id, name=name, status=TaskStatus.FAILED)
             result.error = "Empty command"
-            self._tasks[task_id] = result
+            with self._lock:
+                self._tasks[task_id] = result
             return task_id
 
         timeout = min(max(timeout, MIN_TASK_TIMEOUT), MAX_TASK_TIMEOUT)
@@ -163,7 +164,8 @@ class TaskManager:
             args=(task_id, command, timeout, callback),
             daemon=True,
         )
-        self._threads[task_id] = thread
+        with self._lock:
+            self._threads[task_id] = thread
         thread.start()
 
         log.info("Submitted task %s: %s", task_id, name)
@@ -188,48 +190,54 @@ class TaskManager:
             name=name,
             status=TaskStatus.PENDING,
         )
-        self._tasks[task_id] = result
+
+        with self._lock:
+            self._tasks[task_id] = result
 
         thread = threading.Thread(
             target=self._run_callable,
             args=(task_id, fn, args, kwargs or {}, callback),
             daemon=True,
         )
-        self._threads[task_id] = thread
+        with self._lock:
+            self._threads[task_id] = thread
         thread.start()
 
         return task_id
 
     def get_status(self, task_id: str) -> TaskResult | None:
         """Get the current status of a task."""
-        return self._tasks.get(task_id)
+        with self._lock:
+            return self._tasks.get(task_id)
 
     def list_tasks(self, status: TaskStatus | None = None) -> list[TaskResult]:
         """List tasks, optionally filtered by status."""
-        tasks = list(self._tasks.values())
+        with self._lock:
+            tasks = list(self._tasks.values())
         if status:
             tasks = [t for t in tasks if t.status == status]
         return sorted(tasks, key=lambda t: t.started_at or 0, reverse=True)
 
     def cancel(self, task_id: str) -> bool:
         """Cancel a running task."""
-        task = self._tasks.get(task_id)
-        if not task:
-            return False
+        with self._lock:
+            task = self._tasks.get(task_id)
+            if not task:
+                return False
+            if task.status != TaskStatus.RUNNING:
+                return False
+            proc = self._processes.get(task_id)
 
-        if task.status != TaskStatus.RUNNING:
-            return False
-
-        # Kill the subprocess if it exists
-        proc = self._processes.get(task_id)
+        # Kill the subprocess if it exists (outside lock to avoid holding lock during I/O)
         if proc:
             try:
                 proc.kill()
             except Exception as e:
                 log.debug("Could not kill process for task %s: %s", task_id, e)
 
-        task.status = TaskStatus.CANCELLED
-        task.completed_at = time.time()
+        with self._lock:
+            task.status = TaskStatus.CANCELLED
+            task.completed_at = time.time()
         log.info("Cancelled task %s", task_id)
         return True
 
@@ -278,9 +286,10 @@ class TaskManager:
         callback: Callable | None,
     ) -> None:
         """Execute a shell command in the background."""
-        task = self._tasks[task_id]
-        task.status = TaskStatus.RUNNING
-        task.started_at = time.time()
+        with self._lock:
+            task = self._tasks[task_id]
+            task.status = TaskStatus.RUNNING
+            task.started_at = time.time()
 
         try:
             proc = subprocess.Popen(
@@ -291,29 +300,34 @@ class TaskManager:
                 text=True,
                 cwd=self.working_dir,
             )
-            self._processes[task_id] = proc
+            with self._lock:
+                self._processes[task_id] = proc
 
             stdout, _ = proc.communicate(timeout=timeout)
-            task.output = stdout or ""
-            task.return_code = proc.returncode
-            task.status = TaskStatus.COMPLETED if proc.returncode == 0 else TaskStatus.FAILED
-            if proc.returncode != 0:
-                task.error = f"Exit code: {proc.returncode}"
+            with self._lock:
+                task.output = stdout or ""
+                task.return_code = proc.returncode
+                task.status = TaskStatus.COMPLETED if proc.returncode == 0 else TaskStatus.FAILED
+                if proc.returncode != 0:
+                    task.error = f"Exit code: {proc.returncode}"
 
         except subprocess.TimeoutExpired:
-            task.status = TaskStatus.FAILED
-            task.error = f"Timed out after {timeout}s"
-            proc = self._processes.get(task_id)
+            with self._lock:
+                task.status = TaskStatus.FAILED
+                task.error = f"Timed out after {timeout}s"
+                proc = self._processes.get(task_id)
             if proc:
                 proc.kill()
 
         except Exception as e:
-            task.status = TaskStatus.FAILED
-            task.error = str(e)
+            with self._lock:
+                task.status = TaskStatus.FAILED
+                task.error = str(e)
 
         finally:
-            task.completed_at = time.time()
-            self._processes.pop(task_id, None)
+            with self._lock:
+                task.completed_at = time.time()
+                self._processes.pop(task_id, None)
             log.info("Task %s %s (%.1fs)", task_id, task.status.value, task.elapsed_s)
 
             if callback:
@@ -331,22 +345,26 @@ class TaskManager:
         callback: Callable | None,
     ) -> None:
         """Execute a Python callable in the background."""
-        task = self._tasks[task_id]
-        task.status = TaskStatus.RUNNING
-        task.started_at = time.time()
+        with self._lock:
+            task = self._tasks[task_id]
+            task.status = TaskStatus.RUNNING
+            task.started_at = time.time()
 
         try:
             result = fn(*args, **kwargs)
-            task.output = str(result) if result else ""
-            task.return_code = 0
-            task.status = TaskStatus.COMPLETED
+            with self._lock:
+                task.output = str(result) if result else ""
+                task.return_code = 0
+                task.status = TaskStatus.COMPLETED
 
         except Exception as e:
-            task.status = TaskStatus.FAILED
-            task.error = str(e)
+            with self._lock:
+                task.status = TaskStatus.FAILED
+                task.error = str(e)
 
         finally:
-            task.completed_at = time.time()
+            with self._lock:
+                task.completed_at = time.time()
             log.info("Task %s %s (%.1fs)", task_id, task.status.value, task.elapsed_s)
 
             if callback:
