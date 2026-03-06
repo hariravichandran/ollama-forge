@@ -102,6 +102,12 @@ class OllamaClient:
         self._session_created: float = time.time()
         self._session_max_age: float = 1800  # 30 minutes
 
+    def close(self) -> None:
+        """Close the HTTP session and release resources."""
+        if self._session:
+            self._session.close()
+            log.debug("Closed HTTP session for OllamaClient")
+
     @staticmethod
     def _validate_base_url(url: str) -> str:
         """Validate and normalize the base URL."""

@@ -70,15 +70,21 @@ class TaskResult:
 
     @property
     def done(self) -> bool:
+        """Whether the task has finished (completed, failed, or cancelled)."""
         return self.status in (TaskStatus.COMPLETED, TaskStatus.FAILED, TaskStatus.CANCELLED)
 
     @property
     def elapsed_s(self) -> float:
+        """Elapsed time in seconds (live if running, final if done)."""
         if self.completed_at and self.started_at:
             return self.completed_at - self.started_at
         elif self.started_at:
             return time.time() - self.started_at
         return 0.0
+
+    def __repr__(self) -> str:
+        elapsed = f", {self.elapsed_s:.1f}s" if self.started_at else ""
+        return f"TaskResult({self.task_id}, {self.status.value}{elapsed})"
 
 
 class TaskManager:
@@ -226,6 +232,30 @@ class TaskManager:
         task.completed_at = time.time()
         log.info("Cancelled task %s", task_id)
         return True
+
+    def shutdown(self, timeout: float = 10.0) -> None:
+        """Gracefully shut down all running tasks and join threads.
+
+        Cancels running tasks and waits for threads to finish.
+
+        Args:
+            timeout: Maximum seconds to wait for each thread to join.
+        """
+        # Cancel all running tasks
+        with self._lock:
+            running = [tid for tid, t in self._tasks.items() if t.status == TaskStatus.RUNNING]
+
+        for tid in running:
+            self.cancel(tid)
+
+        # Join all threads
+        for tid, thread in list(self._threads.items()):
+            if thread.is_alive():
+                thread.join(timeout=timeout)
+                if thread.is_alive():
+                    log.warning("Thread for task %s did not finish within %.0fs", tid, timeout)
+
+        log.info("TaskManager shutdown complete (%d tasks processed)", len(self._tasks))
 
     def cleanup(self) -> int:
         """Remove completed/failed/cancelled tasks. Returns count removed."""
