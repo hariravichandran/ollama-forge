@@ -40,6 +40,17 @@ class HardwareProfile:
     description: str
     is_cpu_only: bool = False  # True when running without GPU acceleration
 
+    def __post_init__(self) -> None:
+        """Validate profile fields."""
+        self.min_gpu_gb = max(0.0, self.min_gpu_gb)
+        self.max_threads = max(1, self.max_threads)
+        self.num_ctx = max(128, self.num_ctx)
+        self.num_batch = max(1, self.num_batch)
+
+    def __repr__(self) -> str:
+        cpu = " (CPU-only)" if self.is_cpu_only else ""
+        return f"HardwareProfile({self.name!r}, {self.recommended_model}, ctx={self.num_ctx}{cpu})"
+
 
 # Hardware profiles from compact to high-end
 PROFILES = [

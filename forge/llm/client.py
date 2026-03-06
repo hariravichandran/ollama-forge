@@ -49,11 +49,19 @@ class LLMStats:
 
     @property
     def avg_time_s(self) -> float:
+        """Average time per LLM call in seconds."""
         return self.total_time_s / max(1, self.total_calls)
 
     @property
     def avg_tokens_per_sec(self) -> float:
+        """Average tokens generated per second across all calls."""
         return self.total_tokens / max(0.01, self.total_time_s)
+
+    def __repr__(self) -> str:
+        return (
+            f"LLMStats(calls={self.total_calls}, tokens={self.total_tokens}, "
+            f"avg_time={self.avg_time_s:.2f}s, errors={self.errors})"
+        )
 
 
 class OllamaClient:

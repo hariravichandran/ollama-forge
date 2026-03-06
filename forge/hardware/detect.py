@@ -51,6 +51,17 @@ class GPUInfo:
     architecture: str = ""  # e.g., "gfx1035" for RDNA2, "arm64" for Apple Silicon
     is_igpu: bool = False
 
+    def __post_init__(self) -> None:
+        """Clamp memory values to non-negative."""
+        self.vram_gb = max(0.0, self.vram_gb)
+        self.gtt_gb = max(0.0, self.gtt_gb)
+        self.total_gb = max(0.0, self.total_gb)
+
+    def __repr__(self) -> str:
+        mem = f"{self.total_gb:.1f}GB"
+        igpu = " iGPU" if self.is_igpu else ""
+        return f"GPUInfo({self.vendor}, {self.name!r}, {mem}{igpu}, {self.driver or 'no driver'})"
+
     @property
     def usable_gb(self) -> float:
         """Estimated usable memory for LLM inference."""

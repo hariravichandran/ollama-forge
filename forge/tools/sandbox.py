@@ -56,9 +56,20 @@ class ExecutionResult:
     error: str = ""
     peak_memory_mb: float = 0.0  # Peak RSS in MB (Linux only, 0 if unavailable)
 
+    def __post_init__(self) -> None:
+        """Validate execution result fields."""
+        self.duration_s = max(0.0, self.duration_s)
+        self.peak_memory_mb = max(0.0, self.peak_memory_mb)
+
     @property
     def success(self) -> bool:
+        """Whether execution completed successfully (exit 0, no timeout)."""
         return self.return_code == 0 and not self.timed_out
+
+    def __repr__(self) -> str:
+        status = "OK" if self.success else ("TIMEOUT" if self.timed_out else f"exit={self.return_code}")
+        mem = f", {self.peak_memory_mb:.0f}MB" if self.peak_memory_mb else ""
+        return f"ExecutionResult({status}, {self.duration_s}s{mem})"
 
     @property
     def output(self) -> str:
