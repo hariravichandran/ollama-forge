@@ -102,6 +102,9 @@ class WebTool:
         if not query:
             return "Error: empty search query"
 
+        # Clamp max_results to reasonable bounds
+        max_results = max(1, min(max_results, 20))
+
         # Check cache
         cache_key = f"search:{query}:{max_results}"
         cached = self._get_cached(cache_key)

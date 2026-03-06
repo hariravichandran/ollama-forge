@@ -219,7 +219,7 @@ class FilesystemTool:
 
         if start_line or end_line:
             start = max(0, start_line - 1)
-            end = end_line if end_line else len(lines)
+            end = min(end_line, len(lines)) if end_line else len(lines)
             lines = lines[start:end]
             numbered = [f"{i + start + 1:4d}  {line}" for i, line in enumerate(lines)]
             return "\n".join(numbered)

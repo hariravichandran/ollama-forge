@@ -137,6 +137,11 @@ class Sandbox:
         Returns:
             ExecutionResult with stdout, stderr, and metadata.
         """
+        if not code or not code.strip():
+            return ExecutionResult(
+                stdout="", stderr="", return_code=-1,
+                duration_s=0.0, error="Empty code",
+            )
         timeout = timeout or self.timeout
         tmpdir = tempfile.mkdtemp(prefix="forge-sandbox-")
 
@@ -206,6 +211,11 @@ class Sandbox:
         Returns:
             ExecutionResult with stdout, stderr, and metadata.
         """
+        if not command or not command.strip():
+            return ExecutionResult(
+                stdout="", stderr="", return_code=-1,
+                duration_s=0.0, error="Empty command",
+            )
         timeout = timeout or self.timeout
         tmpdir = tempfile.mkdtemp(prefix="forge-sandbox-")
 
@@ -462,13 +472,19 @@ class SandboxTool:
     def execute(self, function_name: str, args: dict[str, Any]) -> str:
         """Execute a sandbox tool function."""
         if function_name == "run_code":
+            code = args.get("code", "")
+            if not code or not code.strip():
+                return "Error: empty code"
             result = self.sandbox.run_python(
-                code=args["code"],
+                code=code,
                 timeout=args.get("timeout", 30),
             )
         elif function_name == "run_shell":
+            command = args.get("command", "")
+            if not command or not command.strip():
+                return "Error: empty command"
             result = self.sandbox.run_command(
-                command=args["command"],
+                command=command,
                 timeout=args.get("timeout", 30),
             )
         else:
