@@ -230,10 +230,14 @@ class IdeaCollector:
                 data = json.loads(line)
                 idea = Idea(**data)
                 ideas[idea.id] = idea
-            except (json.JSONDecodeError, TypeError):
+            except (json.JSONDecodeError, TypeError) as e:
+                log.debug("Skipping malformed idea entry: %s", e)
                 continue
         return ideas
 
     def _save(self) -> None:
         lines = [json.dumps(asdict(idea)) for idea in self._ideas.values()]
-        self.ideas_file.write_text("\n".join(lines) + "\n" if lines else "")
+        try:
+            self.ideas_file.write_text("\n".join(lines) + "\n" if lines else "")
+        except OSError as e:
+            log.error("Could not save ideas to %s: %s", self.ideas_file, e)

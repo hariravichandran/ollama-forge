@@ -204,6 +204,7 @@ class SessionManager:
                 log.warning("Ambiguous session ID: %s (matches %d sessions)", session_id, len(matches))
                 return None
             else:
+                log.debug("Session not found: %s", session_id)
                 return None
 
         try:
@@ -245,7 +246,8 @@ class SessionManager:
                     created_at=data.get("created_at", 0),
                     updated_at=data.get("updated_at", 0),
                 ))
-            except Exception:
+            except Exception as e:
+                log.debug("Skipping corrupted session file %s: %s", session_file.name, e)
                 continue
 
         # Sort by updated_at descending
@@ -399,7 +401,8 @@ Agent: {html_mod.escape(session.agent_name)} | Model: {html_mod.escape(session.m
                                 if len(results) >= limit:
                                     return results
                                 break
-            except Exception:
+            except Exception as e:
+                log.debug("Skipping unreadable session file %s during search: %s", session_file.name, e)
                 continue
 
         return results

@@ -137,9 +137,13 @@ class AgentTracker:
             for name, info in data.items():
                 systems[name] = AgentSystemInfo(**info)
             return systems
-        except (json.JSONDecodeError, TypeError, OSError):
+        except (json.JSONDecodeError, TypeError, OSError) as e:
+            log.warning("Could not load agent tracker data from %s: %s", self.tracker_file, e)
             return {}
 
     def _save(self) -> None:
         data = {name: asdict(sys) for name, sys in self.systems.items()}
-        self.tracker_file.write_text(json.dumps(data, indent=2))
+        try:
+            self.tracker_file.write_text(json.dumps(data, indent=2))
+        except OSError as e:
+            log.error("Could not save agent tracker data to %s: %s", self.tracker_file, e)

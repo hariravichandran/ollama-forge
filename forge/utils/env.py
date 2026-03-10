@@ -26,6 +26,7 @@ def load_env(env_path: Path | None = None) -> dict[str, str]:
         # Walk up from cwd looking for .env
         env_path = _find_env_file()
     if env_path is None or not env_path.exists():
+        log.debug("No .env file found")
         return {}
 
     try:
@@ -111,4 +112,5 @@ def get_env_int(key: str, default: int = 0) -> int:
     try:
         return int(val)
     except (ValueError, TypeError):
+        log.debug("Could not parse env var %s=%r as int, using default %d", key, val, default)
         return default
