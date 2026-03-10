@@ -64,6 +64,15 @@ class WebTool:
         # Rate limiting: track last request time per domain
         self._domain_last_request: dict[str, float] = {}
 
+    def __enter__(self) -> WebTool:
+        """Enter context manager."""
+        return self
+
+    def __exit__(self, exc_type: type | None, exc_val: BaseException | None, exc_tb: Any) -> bool:
+        """Exit context manager, closing HTTP session."""
+        self.close()
+        return False
+
     def close(self) -> None:
         """Close HTTP session and release resources."""
         with self._session_lock:

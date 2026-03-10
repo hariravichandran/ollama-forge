@@ -119,6 +119,15 @@ class TaskManager:
         self._threads: dict[str, threading.Thread] = {}
         self._lock = threading.Lock()
 
+    def __enter__(self) -> TaskManager:
+        """Enter context manager."""
+        return self
+
+    def __exit__(self, exc_type: type | None, exc_val: BaseException | None, exc_tb: Any) -> bool:
+        """Exit context manager, shutting down all tasks."""
+        self.shutdown(timeout=5.0)
+        return False
+
     def submit(
         self,
         name: str,

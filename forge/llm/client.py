@@ -107,6 +107,15 @@ class OllamaClient:
         self._session_created: float = time.time()
         self._session_max_age: float = 1800  # 30 minutes
 
+    def __enter__(self) -> OllamaClient:
+        """Enter context manager."""
+        return self
+
+    def __exit__(self, exc_type: type | None, exc_val: BaseException | None, exc_tb: Any) -> bool:
+        """Exit context manager, closing HTTP session."""
+        self.close()
+        return False
+
     def close(self) -> None:
         """Close the HTTP session and release resources."""
         with self._session_lock:

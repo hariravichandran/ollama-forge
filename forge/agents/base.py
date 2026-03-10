@@ -103,6 +103,25 @@ class BaseAgent:
         self._tool_call_count = 0  # total tool calls for periodic cleanup
         self._circuit_breaker_lock = threading.Lock()
 
+    def __enter__(self) -> BaseAgent:
+        """Enter context manager."""
+        return self
+
+    def __exit__(self, exc_type: type | None, exc_val: BaseException | None, exc_tb: Any) -> bool:
+        """Exit context manager, closing all tools that support close()."""
+        self.close()
+        return False
+
+    def close(self) -> None:
+        """Close all tools that have a close() method."""
+        for tool in self._tools.values():
+            close_fn = getattr(tool, "close", None)
+            if callable(close_fn):
+                try:
+                    close_fn()
+                except Exception as e:
+                    log.debug("Error closing tool %s: %s", getattr(tool, "name", "?"), e)
+
     def get_tool_definitions(self) -> list[dict[str, Any]]:
         """Get all tool definitions for Ollama tool calling (cached)."""
         if self._cached_tool_defs is None:
