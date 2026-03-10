@@ -8,8 +8,6 @@ import tempfile
 from pathlib import Path
 from typing import Any
 
-import yaml
-
 from forge.agents.base import BaseAgent, AgentConfig, load_agent_from_yaml
 from forge.llm.client import OllamaClient
 from forge.utils.logging import get_logger
@@ -204,6 +202,7 @@ class AgentOrchestrator:
             }
             # Atomic write: write to temp file then rename
             try:
+                import yaml
                 fd, tmp_path = tempfile.mkstemp(dir=str(agents_dir), suffix=".yaml.tmp")
                 with os.fdopen(fd, "w") as f:
                     yaml.dump(data, f, default_flow_style=False, sort_keys=False)

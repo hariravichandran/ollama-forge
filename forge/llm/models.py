@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 
 
@@ -96,7 +97,6 @@ def estimate_model_size(model_name: str, quantization: str = "") -> float:
         return MODEL_CATALOGUE[model_name].size_gb
 
     # Try to extract parameter count from name (e.g., "model:7b" -> 7)
-    import re
     match = re.search(r"(\d+\.?\d*)b", model_name.lower())
     if match:
         params_b = float(match.group(1))
@@ -113,7 +113,6 @@ def _detect_quantization(model_name: str) -> str:
 
     Checks for common quantization suffixes like ':q5_k_m', '-q8_0', etc.
     """
-    import re
     name_lower = model_name.lower()
     for quant in sorted(QUANTIZATION_MULTIPLIERS.keys(), key=len, reverse=True):
         if quant in name_lower:
@@ -126,7 +125,6 @@ def validate_model_name(model_name: str) -> str:
 
     Returns error message or empty string if valid.
     """
-    import re
     if not model_name or not model_name.strip():
         return "model name cannot be empty"
     if len(model_name) > 200:

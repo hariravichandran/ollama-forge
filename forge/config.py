@@ -6,8 +6,6 @@ import os
 from dataclasses import dataclass, field
 from pathlib import Path
 
-import yaml
-
 from forge.utils.env import load_env
 
 # Default config directory
@@ -101,6 +99,7 @@ def load_config() -> ForgeConfig:
 
     # Load from YAML if exists
     if CONFIG_FILE.exists():
+        import yaml
         with open(CONFIG_FILE) as f:
             data = yaml.safe_load(f) or {}
         for key, value in data.items():
@@ -144,6 +143,7 @@ def load_config() -> ForgeConfig:
 
 def save_config(config: ForgeConfig) -> None:
     """Save configuration to YAML file."""
+    import yaml
     CONFIG_DIR.mkdir(parents=True, exist_ok=True)
     data = {
         k: v for k, v in config.__dict__.items()

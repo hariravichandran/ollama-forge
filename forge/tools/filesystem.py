@@ -7,7 +7,6 @@ matcher finds the best match instead of failing.
 
 from __future__ import annotations
 
-import difflib
 import fnmatch
 import os
 import re
@@ -273,6 +272,7 @@ class FilesystemTool:
 
         Returns (actual_text, similarity_ratio) or None if no good match found.
         """
+        import difflib
         search_lines = search.splitlines()
         content_lines = content.splitlines()
         n_search = len(search_lines)

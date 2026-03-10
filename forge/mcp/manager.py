@@ -9,8 +9,6 @@ import time
 from pathlib import Path
 from typing import Any
 
-import yaml
-
 from forge.mcp.registry import MCP_REGISTRY, MCPEntry
 from forge.mcp.web_search import WebSearchMCP
 from forge.utils.logging import get_logger
@@ -264,15 +262,17 @@ class MCPManager:
     def _load_config(self) -> dict[str, Any]:
         if self.config_path.exists():
             try:
+                import yaml
                 with open(self.config_path) as f:
                     return yaml.safe_load(f) or {}
-            except (yaml.YAMLError, OSError) as e:
+            except Exception as e:
                 log.debug("Could not load MCP config: %s", e)
         return {}
 
     def _save_config(self) -> None:
         """Save MCP configuration to disk with atomic write."""
         try:
+            import yaml
             self.config_path.parent.mkdir(parents=True, exist_ok=True)
             # Write to temp file first, then rename for atomicity
             tmp_path = self.config_path.with_suffix(".yaml.tmp")
